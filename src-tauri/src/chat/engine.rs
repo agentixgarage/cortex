@@ -213,6 +213,20 @@ pub fn answer_or_canned(best_score: f32) -> Option<&'static str> {
     }
 }
 
+/// One numbered citation's worth of merged same-document chunks. See
+/// `ChatEngine::group_citations_by_doc` doc comment for why this grouping
+/// exists (a forced structural fix, not a prompt request).
+struct GroupedDoc {
+    doc_id: String,
+    doc_title: String,
+    /// All kept chunks for this doc, concatenated with a gap marker.
+    combined_text: String,
+    /// Union span across the doc's kept chunks — used for the citation
+    /// highlight deep-link (`?highlight=start-end`).
+    span_start: u32,
+    span_end: u32,
+}
+
 /// Facade for the RAG pipeline. Stateless — all dependencies are passed into
 /// `answer`.
 pub struct ChatEngine;
@@ -324,21 +338,25 @@ impl ChatEngine {
                 *c += 1;
                 true
             })
+            .cloned()
             .collect();
 
         // ── Build citations + numbered docs for the prompt ──
+        // Grouped by doc (not by chunk) — see group_citations_by_doc doc
+        // comment for why this is a structural fix, not a prompt request.
+        let grouped = Self::group_citations_by_doc(&retrieval_dedup);
         let mut citations: Vec<Citation> = Vec::new();
         let mut numbered_docs: Vec<(u32, String, String)> = Vec::new();
-        for (index, (doc_id, doc_title, chunk, _score)) in retrieval_dedup.iter().enumerate() {
+        for (index, g) in grouped.iter().enumerate() {
             let doc_index = (index + 1) as u32;
             citations.push(Citation {
                 index: doc_index,
-                doc_id: doc_id.to_string(),
-                doc_title: doc_title.to_string(),
-                chunk_start: chunk.start,
-                chunk_end: chunk.end,
+                doc_id: g.doc_id.clone(),
+                doc_title: g.doc_title.clone(),
+                chunk_start: g.span_start,
+                chunk_end: g.span_end,
             });
-            numbered_docs.push((doc_index, doc_title.to_string(), chunk.text.clone()));
+            numbered_docs.push((doc_index, g.doc_title.clone(), g.combined_text.clone()));
         }
 
         let numbered_docs_refs: Vec<(u32, &str, &str)> = numbered_docs
@@ -521,6 +539,45 @@ impl ChatEngine {
         }
 
         Ok(())
+    }
+
+    /// Merge same-document chunks into ONE numbered citation, in first-seen
+    /// order (input is already reranked by score descending, so this is
+    /// also relevance order).
+    ///
+    /// FORCED BEHAVIOR, not a prompt request: a real accuracy bug had the
+    /// LLM describing 3 chunks of ONE receipt file as "three separate
+    /// entries" / distinct receipts, because each chunk got its own
+    /// citation number ([1], [2], [3]) even though all three pointed at
+    /// the same doc_id. Asking the model nicely not to do this ("the same
+    /// source document may appear multiple times...") is unreliable —
+    /// collapsing the numbering structurally makes the confusion
+    /// impossible: there is only one number to cite per document, so the
+    /// model cannot invent multiple documents from repeated chunks.
+    fn group_citations_by_doc(chunks: &[(String, String, Chunk, f32)]) -> Vec<GroupedDoc> {
+        let mut order: Vec<String> = Vec::new();
+        let mut groups: std::collections::HashMap<String, GroupedDoc> = std::collections::HashMap::new();
+
+        for (doc_id, doc_title, chunk, _score) in chunks {
+            let entry = groups.entry(doc_id.clone()).or_insert_with(|| {
+                order.push(doc_id.clone());
+                GroupedDoc {
+                    doc_id: doc_id.clone(),
+                    doc_title: doc_title.clone(),
+                    combined_text: String::new(),
+                    span_start: chunk.start,
+                    span_end: chunk.end,
+                }
+            });
+            if !entry.combined_text.is_empty() {
+                entry.combined_text.push_str("\n…\n");
+            }
+            entry.combined_text.push_str(&chunk.text);
+            entry.span_start = entry.span_start.min(chunk.start);
+            entry.span_end = entry.span_end.max(chunk.end);
+        }
+
+        order.into_iter().filter_map(|id| groups.remove(&id)).collect()
     }
 
     /// Build an augmented query for retrieval that carries recent-turn context.
@@ -1004,6 +1061,66 @@ impl ChatEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── group_citations_by_doc: structural fix for citation confabulation ──
+    // Forces the invariant "same doc_id = one citation number" so the LLM
+    // literally cannot describe 3 chunks of ONE file as 3 separate receipts.
+
+    fn make_chunk(start: u32, end: u32, text: &str) -> Chunk {
+        Chunk { text: text.to_string(), start, end }
+    }
+
+    #[test]
+    fn test_group_citations_merges_same_doc_chunks() {
+        let chunks = vec![
+            ("doc-1".to_string(), "Receipt_25_26.pdf".to_string(), make_chunk(0, 100, "chunk A"), 0.9),
+            ("doc-1".to_string(), "Receipt_25_26.pdf".to_string(), make_chunk(200, 300, "chunk B"), 0.8),
+        ];
+        let grouped = ChatEngine::group_citations_by_doc(&chunks);
+        assert_eq!(grouped.len(), 1, "two chunks of the same doc must collapse to ONE citation");
+        assert!(grouped[0].combined_text.contains("chunk A"));
+        assert!(grouped[0].combined_text.contains("chunk B"));
+    }
+
+    #[test]
+    fn test_group_citations_keeps_distinct_docs_separate() {
+        let chunks = vec![
+            ("doc-1".to_string(), "A.pdf".to_string(), make_chunk(0, 100, "text A"), 0.9),
+            ("doc-2".to_string(), "B.pdf".to_string(), make_chunk(0, 100, "text B"), 0.8),
+        ];
+        let grouped = ChatEngine::group_citations_by_doc(&chunks);
+        assert_eq!(grouped.len(), 2);
+    }
+
+    #[test]
+    fn test_group_citations_span_covers_all_chunks() {
+        let chunks = vec![
+            ("doc-1".to_string(), "A.pdf".to_string(), make_chunk(500, 600, "later chunk"), 0.9),
+            ("doc-1".to_string(), "A.pdf".to_string(), make_chunk(0, 100, "earlier chunk"), 0.8),
+        ];
+        let grouped = ChatEngine::group_citations_by_doc(&chunks);
+        assert_eq!(grouped[0].span_start, 0);
+        assert_eq!(grouped[0].span_end, 600);
+    }
+
+    #[test]
+    fn test_group_citations_preserves_first_seen_order() {
+        // Input is already reranked by score desc — first-seen order must
+        // be preserved so citation numbers stay in relevance order.
+        let chunks = vec![
+            ("doc-2".to_string(), "Second.pdf".to_string(), make_chunk(0, 10, "x"), 0.95),
+            ("doc-1".to_string(), "First.pdf".to_string(), make_chunk(0, 10, "y"), 0.90),
+        ];
+        let grouped = ChatEngine::group_citations_by_doc(&chunks);
+        assert_eq!(grouped[0].doc_id, "doc-2");
+        assert_eq!(grouped[1].doc_id, "doc-1");
+    }
+
+    #[test]
+    fn test_group_citations_empty_input() {
+        let chunks: Vec<(String, String, Chunk, f32)> = vec![];
+        assert!(ChatEngine::group_citations_by_doc(&chunks).is_empty());
+    }
 
     // ── Test 1: chunk_text 500/50 overlap ──
     #[test]
