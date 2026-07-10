@@ -21,15 +21,27 @@ const CHATGPT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 ///
 /// Endpoint: POST https://chatgpt.com/backend-api/codex/responses
 /// Auth: Bearer token (from Codex OAuth PKCE flow)
-/// Wire format: OpenAI Responses API (non-streaming)
+/// Wire format: undocumented private API used internally by the `codex` CLI
+/// (chatgpt.com/backend-api/codex/responses, NOT the public Responses API
+/// at api.openai.com). Confirmed against a real captured request (Simon
+/// Willison, "Reverse engineering Codex CLI to get GPT-5-Codex-Mini to draw
+/// me a pelican", Nov 2025) after three separate field-level 400 errors
+/// from guessing: `max_output_tokens` unsupported (no token-limit field
+/// exists in this API), `input` items need `"type": "message"` +
+/// `content` as an array of `{"type": "input_text", "text": ...}` parts
+/// (not a raw string), and `store` must be explicit `false`.
 ///
-/// [ASSUMED] Request/response shape based on Responses API documentation.
-/// The OpenAI Responses API uses "input" array (not "messages"), "max_output_tokens" (not "max_tokens"),
-/// and response body has "output" array with text content.
+/// `instructions` is a REQUIRED top-level field (the article notes the API
+/// does not work without it) — this is where the system prompt goes, NOT
+/// as a developer-role item in `input`.
 pub fn build_codex_request(
     token: &str,
     model: &str,
-    max_tokens: u32,
+    // Not sent — the Codex Responses API has no token-limit parameter
+    // (`max_output_tokens` is explicitly rejected: {"detail":"Unsupported
+    // parameter: max_output_tokens"}). Kept in the signature for call-site
+    // compatibility with the Chat Completions builder.
+    _max_tokens: u32,
     system: &str,
     messages: &[ServiceMessage],
 ) -> (String, Vec<(String, String)>, Value) {
@@ -40,27 +52,41 @@ pub fn build_codex_request(
         ("Content-Type".to_string(), "application/json".to_string()),
     ];
 
-    // Responses API input format: system message as a developer role item,
-    // then user/assistant turns. Non-streaming.
-    let mut input: Vec<Value> = Vec::new();
-    if !system.is_empty() {
-        input.push(json!({"role": "developer", "content": system}));
-    }
-    for m in messages {
-        input.push(json!({"role": m.role, "content": m.content}));
-    }
+    let input: Vec<Value> = messages
+        .iter()
+        .map(|m| {
+            json!({
+                "type": "message",
+                "role": m.role,
+                "content": [{"type": "input_text", "text": m.content}],
+            })
+        })
+        .collect();
+
+    // instructions is required and must be non-empty per the reverse-engineered
+    // shape; fall back to a minimal default if a caller passes an empty system
+    // prompt (Cortex's own callers always set one, but stay defensive).
+    let instructions = if system.is_empty() {
+        "You are a helpful assistant."
+    } else {
+        system
+    };
 
     let body = json!({
         "model": model,
+        "instructions": instructions,
         "input": input,
-        "max_output_tokens": max_tokens,
-        "stream": false,
+        "tools": [],
+        "tool_choice": "auto",
+        "parallel_tool_calls": false,
+        "reasoning": {"summary": "auto"},
         // The Responses API defaults `store` to true (persists the response
         // server-side for 30 days, retrievable via response_id — a
         // Platform/API-key-tier feature). ChatGPT-subscription auth cannot
         // use that storage tier and rejects requests that omit this:
         // {"detail":"Store must be set to false"}.
         "store": false,
+        "stream": false,
     });
 
     (url, headers, body)
@@ -391,7 +417,10 @@ mod tests {
         assert!(body.get("messages").is_none(), "Codex body must NOT have 'messages' (Chat Completions API field)");
         assert!(body.get("stream").is_some(), "Codex body must have 'stream' field");
         assert_eq!(body["stream"], false, "stream must be false for non-streaming");
-        assert_eq!(body["max_output_tokens"], 100, "max_output_tokens must be set");
+        // max_output_tokens is NOT a supported parameter on this API — must
+        // never be sent (confirmed via {"detail":"Unsupported parameter:
+        // max_output_tokens"}).
+        assert!(body.get("max_output_tokens").is_none(), "Codex body must NOT have 'max_output_tokens'");
     }
 
     #[test]
@@ -414,28 +443,49 @@ mod tests {
     }
 
     #[test]
-    fn test_build_codex_request_system_as_developer_role() {
+    fn test_build_codex_request_system_as_top_level_instructions() {
+        // Corrected per reverse-engineered shape: system prompt goes in the
+        // top-level "instructions" field, NOT as a developer-role item in
+        // "input" (the API requires "instructions" to be present/non-empty).
         let msgs = sample_messages();
-        let (_, _, body) = build_codex_request("tok", "gpt-5", 100, "system content", &msgs);
+        let (_, _, body) = build_codex_request("tok", "gpt-5.6-terra", 100, "system content", &msgs);
+
+        assert_eq!(body["instructions"], "system content");
 
         let input = body["input"].as_array().unwrap();
-        // Developer role for system prompt (Responses API convention)
-        assert_eq!(input[0]["role"], "developer");
-        assert_eq!(input[0]["content"], "system content");
-        // User message follows
-        assert_eq!(input[1]["role"], "user");
-        assert_eq!(input[1]["content"], "hello");
+        assert_eq!(input.len(), 1, "input should only contain message turns, not the system prompt");
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[0]["type"], "message");
+        assert_eq!(input[0]["content"][0]["type"], "input_text");
+        assert_eq!(input[0]["content"][0]["text"], "hello");
     }
 
     #[test]
-    fn test_build_codex_request_skips_empty_system() {
+    fn test_build_codex_request_empty_system_falls_back_to_default_instructions() {
         let msgs = sample_messages();
-        let (_, _, body) = build_codex_request("tok", "gpt-5", 100, "", &msgs);
+        let (_, _, body) = build_codex_request("tok", "gpt-5.6-terra", 100, "", &msgs);
+
+        // instructions is required by the API — must never be empty even
+        // when the caller passes an empty system prompt.
+        assert!(!body["instructions"].as_str().unwrap().is_empty());
 
         let input = body["input"].as_array().unwrap();
-        // Empty system prompt → no developer role item, only user message
         assert_eq!(input.len(), 1);
         assert_eq!(input[0]["role"], "user");
+    }
+
+    #[test]
+    fn test_build_codex_request_required_fields_present() {
+        // Fields confirmed required by the reverse-engineered wire shape —
+        // omitting any of these produced a 400 in real testing.
+        let msgs = sample_messages();
+        let (_, _, body) = build_codex_request("tok", "gpt-5.6-terra", 100, "sys", &msgs);
+
+        assert!(body.get("tools").is_some());
+        assert!(body.get("tool_choice").is_some());
+        assert!(body.get("parallel_tool_calls").is_some());
+        assert!(body.get("reasoning").is_some());
+        assert!(body.get("instructions").is_some());
     }
 
     // --- Plan 11.7-04 Task 3: streaming request builder tests ---
