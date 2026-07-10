@@ -38,6 +38,15 @@ ruvllm = { path = "../../experiments/ruvector/crates/ruvllm", default-features =
 fastembed = "5"
 notify-debouncer-mini = "0.4"
 pdf-extract = "0.10"
+# v1.2 #4: OCR for image files (png/jpg/jpeg/tiff). Wraps system-installed
+# libtesseract + liblept via C bindings (build.rs uses pkg-config) — NOT
+# bundled, matches this project's existing "wrap the local system tool"
+# pattern (Ollama, tauri-plugin-dialog). Requires `brew install tesseract`
+# (macOS) / `apt install libtesseract-dev libleptonica-dev` (Linux) at build
+# time. Scanned-PDF rasterization (PDF page → image → OCR) is a separate,
+# larger fast-follow (ROADMAP.md #4b) — needs a PDF rendering dependency
+# (pdfium/poppler) this pass deliberately does not add.
+tesseract = "0.15"
 docx-rust = "0.1"
 calamine = { version = "0.24", features = ["dates"] }
 sha2 = "0.10"

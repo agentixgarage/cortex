@@ -282,6 +282,8 @@ Semaphore-limited LLM concurrency (default 1 for backfill, prevents rate-limit d
 - macOS 13+, Linux, or Windows 10+
 - Rust 1.77+ (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh`)
 - Bun 1.0+ (`curl -fsSL https://bun.sh/install \| bash`) or Node 20+ / pnpm
+- Tesseract + Leptonica (for image OCR — png/jpg/jpeg/tiff indexing):
+  `brew install tesseract` (macOS) / `apt install libtesseract-dev libleptonica-dev` (Linux) / see [tesseract.js.org](https://tesseract-ocr.github.io/tessdoc/Installation.html) (Windows)
 - (Optional) An Anthropic / OpenAI / Gemini API key, OR a local Ollama install, OR use bundled ruvllm
 
 ### Build & run
@@ -331,7 +333,11 @@ Everything works LLM-free too — Pass 1 alone extracts structured IDs and enabl
 - ✅ Recency-weighted ranking
 
 ### v1.2 (next)
-- ⏳ Tesseract OCR pipeline for scanned PDFs and images
+- ✅ Chat follow-up suggestion chips
+- ✅ Onboarding "About You" step (name/aliases/family/countries/currencies → RAG context)
+- ✅ Daily quiz card + batch quiz panel (entity-alias confirmation feedback loop)
+- ✅ Tesseract OCR for image files (png/jpg/jpeg/tiff)
+- ⏳ Scanned-PDF rasterization + OCR (needs pdfium-render — permissive-licensed PDF rendering)
 - ⏳ CLIP visual embeddings via fastembed ImageEmbedding — visual similarity search over photos, floor plans, receipt scans
 - ⏳ Predicate consolidation UI ("bought/purchased/acquired → same predicate?")
 - ⏳ SONA feedback loop — search click-through re-ranks future queries

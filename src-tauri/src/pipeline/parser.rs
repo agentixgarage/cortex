@@ -18,8 +18,15 @@ pub struct ParsedDocument {
 /// - `txt` / `md`    — read directly as UTF-8
 /// - `csv`           — read directly as UTF-8
 /// - `xlsx` / `xls` / `ods` — via calamine
-/// - `png` / `jpg` / `jpeg` / `tiff` — returns OCR placeholder error
+/// - `png` / `jpg` / `jpeg` / `tiff` — via tesseract OCR (v1.2 #4)
 /// - anything else   — returns unsupported-type error
+///
+/// Note (v1.2 #4 scope): scanned/image-only PDFs (no text layer) still
+/// return whatever pdf-extract finds, which may be empty or near-empty.
+/// OCR-ing a scanned PDF requires rasterizing each page to an image first —
+/// tracked separately as ROADMAP.md #4b (needs a PDF-render dependency,
+/// e.g. pdfium-render — deliberately not added in this pass). Once a page
+/// is rasterized, it flows through the exact same `ocr_image` path below.
 pub fn parse_document(path: &Path) -> Result<ParsedDocument, AppError> {
     let ext = path
         .extension()
@@ -39,11 +46,7 @@ pub fn parse_document(path: &Path) -> Result<ParsedDocument, AppError> {
         "txt" | "md" => std::fs::read_to_string(path).map_err(AppError::from)?,
         "csv" => std::fs::read_to_string(path).map_err(AppError::from)?,
         "xlsx" | "xls" | "ods" => parse_spreadsheet(path)?,
-        "png" | "jpg" | "jpeg" | "tiff" => {
-            return Err(AppError::Parse(
-                "OCR not available — image indexing requires tesseract (coming soon)".to_string(),
-            ))
-        }
+        "png" | "jpg" | "jpeg" | "tiff" => ocr_image(path)?,
         other => {
             return Err(AppError::Parse(format!(
                 "Unsupported file type: {}",
@@ -57,6 +60,28 @@ pub fn parse_document(path: &Path) -> Result<ParsedDocument, AppError> {
         title,
         doc_type: ext,
     })
+}
+
+/// Run tesseract OCR over an image file, returning the extracted text.
+/// Uses the English trained-data language pack ("eng") — matches the
+/// system default `tesseract` CLI behavior.
+///
+/// Errors surface as `AppError::Parse` with the underlying tesseract error
+/// message (missing trained-data, corrupt image, etc.) rather than
+/// panicking — mirrors `parse_pdf`'s error-not-panic contract so one bad
+/// image doesn't kill the indexing worker.
+fn ocr_image(path: &Path) -> Result<String, AppError> {
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| AppError::Parse(format!("non-UTF8 path: {}", path.display())))?;
+
+    let mut api = tesseract::Tesseract::new(None, Some("eng"))
+        .map_err(|e| AppError::Parse(format!("tesseract init failed: {}", e)))?
+        .set_image(path_str)
+        .map_err(|e| AppError::Parse(format!("tesseract set_image failed: {}", e)))?;
+
+    api.get_text()
+        .map_err(|e| AppError::Parse(format!("tesseract OCR failed: {}", e)))
 }
 
 fn parse_pdf(path: &Path) -> Result<String, AppError> {
@@ -168,11 +193,34 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_image_returns_ocr_error() {
+    fn test_parse_image_runs_ocr_and_extracts_text() {
+        // Fixture generated via ImageMagick: 400x100 white canvas, black
+        // text "HELLO CORTEX", 28pt. Verified readable by `tesseract` CLI
+        // directly (5.5.1 + leptonica 1.86.0) before being checked in.
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ocr_test.png");
+        let result = parse_document(&fixture).unwrap();
+        assert!(
+            result.text.to_uppercase().contains("HELLO"),
+            "OCR text was: {:?}",
+            result.text
+        );
+        assert!(
+            result.text.to_uppercase().contains("CORTEX"),
+            "OCR text was: {:?}",
+            result.text
+        );
+        assert_eq!(result.doc_type, "png");
+    }
+
+    #[test]
+    fn test_parse_image_malformed_file_returns_parse_error_not_panic() {
+        // Zero-byte file with a .png extension — not a valid image.
+        // Must return AppError::Parse, never panic (mirrors parse_pdf's
+        // panic-catch contract — one bad file must not kill the indexer).
         let f = NamedTempFile::with_suffix(".png").unwrap();
         let err = parse_document(f.path()).unwrap_err();
         match err {
-            AppError::Parse(msg) => assert!(msg.contains("OCR not available")),
+            AppError::Parse(_) => {}
             other => panic!("Expected Parse error, got {:?}", other),
         }
     }
