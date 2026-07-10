@@ -13,6 +13,7 @@ pub mod saved_searches;
 pub mod graph;
 pub mod intelligence;
 pub mod chat;
+pub mod profile;
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -205,6 +206,11 @@ pub fn run() {
                 crate::chat::session_store::ChatSessionStore::load(&app_data),
             ));
 
+            // v1.2 #2: User profile (onboarding "About You" step)
+            let user_profile = Arc::new(Mutex::new(
+                crate::profile::store::load(&app_data),
+            ));
+
             // Phase 10 (Plan 06): Initialize hyperbolic HNSW secondary index fields.
             // Both start empty — None for the index (D-11 fallback active until first recluster),
             // and an empty Vec for the id map. Populated by rebuild_hyp_index() after recluster.
@@ -236,6 +242,7 @@ pub fn run() {
                 chat_session_store,
                 ontology_store,
                 auth_state: auth_arc,
+                user_profile,
             });
 
             Ok(())
@@ -330,6 +337,9 @@ pub fn run() {
             crate::commands::ontology::set_automatic_ontology_growth,
             // Phase 11.8 Plan 06 — local-ruvllm model download (D-04)
             commands::ai::download_ruvllm_model,
+            // v1.2 #2 — User profile (onboarding "About You")
+            commands::profile::get_user_profile,
+            commands::profile::save_user_profile,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -7,3 +7,4 @@ pub mod entities;
 pub mod ai;
 pub mod relations;
 pub mod ontology;
+pub mod profile;

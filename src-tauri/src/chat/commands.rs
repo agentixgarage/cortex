@@ -132,6 +132,7 @@ pub async fn start_chat(
     let embedding_service_arc = state.embedding_service.clone();
     let entity_store_arc = state.entity_store.clone();
     let chat_store_arc = state.chat_session_store.clone();
+    let user_profile_arc = state.user_profile.clone();
     let app_data_dir = state.app_data_dir.clone();
     let query_owned = trimmed_query.to_string();
     let filters = args.filters;
@@ -148,6 +149,7 @@ pub async fn start_chat(
             embedding_service_arc,
             entity_store_arc,
             chat_store_arc,
+            user_profile_arc,
             app_data_dir,
             session_id_for_task,
             user_message_id_for_task,

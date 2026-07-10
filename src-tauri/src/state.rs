@@ -16,6 +16,7 @@ use crate::intelligence::analytics::{ActivityLog, SearchTracker};
 use crate::intelligence::sona_bridge::SearchLearner;
 use crate::spaces::hyp_index::{HypIdMapState, HypIndexState};
 use crate::chat::session_store::ChatSessionStore;
+use crate::types::UserProfile;
 use crate::saved_searches::store::SavedSearchStore;
 use crate::spaces::label_cache::SpaceLabelCache;
 use crate::spaces::manager::SpaceManager;
@@ -106,4 +107,9 @@ pub struct AppState {
     pub ontology_store: Arc<Mutex<OntologyStore>>,
     /// Phase 11.6: Shared AI credential store for backfill bootstrap.
     pub auth_state: Arc<AuthState>,
+    /// v1.2 #2: Optional user profile (name/aliases/family/countries/
+    /// currencies) collected in onboarding's "About You" step. Persisted to
+    /// app_data_dir/user_profile.json. Consumed by ChatEngine to seed the
+    /// RAG system prompt with context documents alone cannot supply.
+    pub user_profile: Arc<Mutex<UserProfile>>,
 }

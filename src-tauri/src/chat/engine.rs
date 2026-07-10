@@ -45,6 +45,62 @@ pub const RAG_SYSTEM_PROMPT: &str = "You are a helpful assistant answering quest
 /// Canned answer returned when no chunk clears the cosine floor (D-03).
 const NO_MATCH_ANSWER: &str = "I couldn't find anything relevant in your library.";
 
+/// Build the effective system prompt: `RAG_SYSTEM_PROMPT` plus an optional
+/// "Known context about the user" block derived from their profile
+/// (v1.2 #2). Empty profile → prompt is returned unchanged (byte-identical
+/// to `RAG_SYSTEM_PROMPT`), so existing tests/behavior for users who skip
+/// onboarding are unaffected.
+///
+/// This directly fixes cases like "generate my family tree" — without a
+/// known-family hint the LLM sees documents with matching surnames and
+/// correctly refuses to guess relationships; with the user-confirmed
+/// relations from onboarding, it can state them directly instead of
+/// hedging or refusing.
+pub fn build_system_prompt(profile: &crate::types::UserProfile) -> String {
+    let has_content = !profile.display_name.trim().is_empty()
+        || !profile.aliases.is_empty()
+        || !profile.family_members.is_empty()
+        || !profile.countries.is_empty()
+        || !profile.currencies.is_empty();
+
+    if !has_content {
+        return RAG_SYSTEM_PROMPT.to_string();
+    }
+
+    let mut block = String::from("\n\nKnown context about the user (confirmed by the user, not inferred — trust this over document-only guesses):");
+    if !profile.display_name.trim().is_empty() {
+        block.push_str(&format!("\n- The user's name is {}.", profile.display_name.trim()));
+    }
+    if !profile.aliases.is_empty() {
+        block.push_str(&format!(
+            "\n- The user is also known by: {}.",
+            profile.aliases.join(", ")
+        ));
+    }
+    if !profile.family_members.is_empty() {
+        let rels: Vec<String> = profile
+            .family_members
+            .iter()
+            .map(|f| format!("{} ({})", f.name, f.relation))
+            .collect();
+        block.push_str(&format!("\n- Family members: {}.", rels.join(", ")));
+    }
+    if !profile.countries.is_empty() {
+        block.push_str(&format!(
+            "\n- The user has documents/assets in: {}.",
+            profile.countries.join(", ")
+        ));
+    }
+    if !profile.currencies.is_empty() {
+        block.push_str(&format!(
+            "\n- Currencies commonly used in the user's documents: {}.",
+            profile.currencies.join(", ")
+        ));
+    }
+
+    format!("{}{}", RAG_SYSTEM_PROMPT, block)
+}
+
 /// A single chunk of a document's text, with char offsets so citations can
 /// reference back to the exact span (D-02: 500 chars / 50-char overlap).
 #[derive(Debug, Clone, PartialEq)]
@@ -174,6 +230,7 @@ impl ChatEngine {
         embedding_service: Arc<EmbeddingService>,
         entity_store: Arc<std::sync::Mutex<EntityStore>>,
         chat_store: Arc<Mutex<ChatSessionStore>>,
+        user_profile: Arc<Mutex<crate::types::UserProfile>>,
         app_data_dir: PathBuf,
         session_id: String,
         _user_message_id: String,
@@ -289,7 +346,12 @@ impl ChatEngine {
             .map(|(i, t, c)| (*i, t.as_str(), c.as_str()))
             .collect();
 
-        let prompt = build_rag_prompt(RAG_SYSTEM_PROMPT, &numbered_docs_refs, &query);
+        let system_prompt = {
+            let profile = user_profile.lock().await;
+            build_system_prompt(&profile)
+        };
+
+        let prompt = build_rag_prompt(&system_prompt, &numbered_docs_refs, &query);
 
         // Build message list with recent history so LLM sees the conversation
         // arc, not just the current query in isolation. History is user↔assistant
@@ -311,7 +373,7 @@ impl ChatEngine {
         });
 
         let request = crate::ai::AIServiceRequest {
-            system_prompt: RAG_SYSTEM_PROMPT.to_string(),
+            system_prompt: system_prompt.clone(),
             messages,
             max_tokens: Some(4096),
             temperature: None,
@@ -999,7 +1061,7 @@ mod tests {
     #[test]
     fn test_find_years_underscore_delimited_filename() {
         assert_eq!(
-            ChatEngine::find_years("Prop_Sarovar_P705_FY2016-17.pdf"),
+            ChatEngine::find_years("Prop_Riverside_P705_FY2016-17.pdf"),
             vec!["2016".to_string()]
         );
         assert_eq!(
@@ -1047,5 +1109,67 @@ mod tests {
     #[test]
     fn test_find_years_no_years_present() {
         assert!(ChatEngine::find_years("no dates here at all").is_empty());
+    }
+
+    // ── build_system_prompt (v1.2 #2: onboarding "About You" → RAG context) ──
+
+    #[test]
+    fn test_build_system_prompt_empty_profile_returns_base_unchanged() {
+        let profile = crate::types::UserProfile::default();
+        assert_eq!(build_system_prompt(&profile), RAG_SYSTEM_PROMPT);
+    }
+
+    #[test]
+    fn test_build_system_prompt_name_only() {
+        let profile = crate::types::UserProfile {
+            display_name: "Alex Doe".to_string(),
+            ..Default::default()
+        };
+        let prompt = build_system_prompt(&profile);
+        assert!(prompt.starts_with(RAG_SYSTEM_PROMPT));
+        assert!(prompt.contains("The user's name is Alex Doe."));
+    }
+
+    #[test]
+    fn test_build_system_prompt_family_members() {
+        let profile = crate::types::UserProfile {
+            family_members: vec![
+                crate::types::FamilyMember { name: "Jane Doe".to_string(), relation: "spouse".to_string() },
+                crate::types::FamilyMember { name: "Sam Doe".to_string(), relation: "child".to_string() },
+            ],
+            ..Default::default()
+        };
+        let prompt = build_system_prompt(&profile);
+        assert!(prompt.contains("Jane Doe (spouse)"));
+        assert!(prompt.contains("Sam Doe (child)"));
+    }
+
+    #[test]
+    fn test_build_system_prompt_full_profile() {
+        let profile = crate::types::UserProfile {
+            display_name: "Alex Doe".to_string(),
+            aliases: vec!["A. Doe".to_string()],
+            family_members: vec![crate::types::FamilyMember {
+                name: "Jane Doe".to_string(),
+                relation: "spouse".to_string(),
+            }],
+            countries: vec!["India".to_string(), "USA".to_string()],
+            currencies: vec!["INR".to_string(), "USD".to_string()],
+        };
+        let prompt = build_system_prompt(&profile);
+        assert!(prompt.contains("Alex Doe"));
+        assert!(prompt.contains("A. Doe"));
+        assert!(prompt.contains("Jane Doe (spouse)"));
+        assert!(prompt.contains("India, USA"));
+        assert!(prompt.contains("INR, USD"));
+    }
+
+    #[test]
+    fn test_build_system_prompt_whitespace_only_name_treated_as_empty() {
+        let profile = crate::types::UserProfile {
+            display_name: "   ".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(build_system_prompt(&profile), RAG_SYSTEM_PROMPT);
     }
 }

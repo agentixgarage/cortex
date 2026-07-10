@@ -1,12 +1,13 @@
 /**
- * OnboardingPage - 5-step first-time user wizard.
+ * OnboardingPage - 6-step first-time user wizard.
  *
  * Steps:
  *  0. Welcome       - branding and value prop
- *  1. Connect AI    - NEW (D-12) 2x2 provider grid with inline forms
- *  2. Select Folders - pick folders to watch (was step 1)
- *  3. Scanning Progress - live indexing feedback (was step 2)
- *  4. Spaces Ready  - discovered spaces and CTA (was step 3)
+ *  1. Connect AI    - (D-12) 2x2 provider grid with inline forms
+ *  2. About You     - v1.2 #2 (ROADMAP.md), optional/skippable profile seed
+ *  3. Select Folders - pick folders to watch
+ *  4. Scanning Progress - live indexing feedback
+ *  5. Spaces Ready  - discovered spaces and CTA
  */
 
 import { useState, useCallback, useEffect } from "react";
@@ -30,6 +31,7 @@ import {
   useSpaces,
 } from "@/hooks/useTauri";
 import { ConnectAiStep } from "@/components/ai/ConnectAiStep";
+import { AboutYouStep } from "@/components/onboarding/AboutYouStep";
 import { isTauri } from "@/lib/tauri";
 import { resolveIcon } from "@/lib/icons";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -114,7 +116,7 @@ export default function OnboardingPage() {
 
   // Start scanning selected folders
   const startScanning = async () => {
-    setStep(3);  // Step 3 is now Scanning (was step 2)
+    setStep(4);  // Step 4 is now Scanning
     let totalProcessed = 0;
     const totalFolders = selectedFolders.length;
     setScanningProgress({ processed: 0, total: totalFolders * 100, currentFile: "Starting..." });
@@ -143,13 +145,13 @@ export default function OnboardingPage() {
       }
     }
 
-    // Auto-advance to step 4 (Spaces Ready)
-    setTimeout(() => setStep(4), 1000);
+    // Auto-advance to step 5 (Spaces Ready)
+    setTimeout(() => setStep(5), 1000);
   };
 
   // Listen for indexing events and update progress display
   useEffect(() => {
-    if (step === 3 && indexingStore.isIndexing) {  // step 3 is now Scanning
+    if (step === 4 && indexingStore.isIndexing) {  // step 4 is now Scanning
       setScanningProgress({
         processed: indexingStore.filesProcessed,
         total: indexingStore.totalFiles,
@@ -174,7 +176,7 @@ export default function OnboardingPage() {
       <div className="w-full max-w-lg space-y-8">
         {/* Step indicator */}
         <div className="flex justify-center">
-          <StepIndicator current={step} total={5} />
+          <StepIndicator current={step} total={6} />
         </div>
 
         {/* Step 0: Welcome */}
@@ -214,8 +216,16 @@ export default function OnboardingPage() {
           />
         )}
 
-        {/* Step 2: Select Folders (was step 1) */}
+        {/* Step 2: About You (v1.2 #2 — ROADMAP.md, optional/skippable) */}
         {step === 2 && (
+          <AboutYouStep
+            onContinue={() => setStep(3)}
+            onSkip={() => setStep(3)}
+          />
+        )}
+
+        {/* Step 3: Select Folders (was step 1) */}
+        {step === 3 && (
           <div className="space-y-6 animate-in fade-in duration-500">
             <div className="text-center space-y-2">
               <h2 className="section-title text-text-primary">
@@ -305,7 +315,7 @@ export default function OnboardingPage() {
             {/* Action button */}
             <div className="flex justify-between pt-2">
               <button
-                onClick={() => setStep(1)}
+                onClick={() => setStep(2)}
                 className="text-sm text-text-tertiary hover:text-text-secondary transition-colors"
               >
                 Back
@@ -327,8 +337,8 @@ export default function OnboardingPage() {
           </div>
         )}
 
-        {/* Step 3: Scanning Progress (was step 2) */}
-        {step === 3 && (
+        {/* Step 4: Scanning Progress (was step 2) */}
+        {step === 4 && (
           <div className="space-y-6 text-center animate-in fade-in duration-500">
             <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-accent-primary/10">
               <Loader2
@@ -370,7 +380,7 @@ export default function OnboardingPage() {
 
             {/* Skip button */}
             <button
-              onClick={() => setStep(4)}
+              onClick={() => setStep(5)}
               className="inline-flex items-center gap-1 text-sm text-text-tertiary hover:text-text-secondary transition-colors"
             >
               <SkipForward size={14} />
@@ -379,8 +389,8 @@ export default function OnboardingPage() {
           </div>
         )}
 
-        {/* Step 4: Spaces Ready (was step 3) */}
-        {step === 4 && (
+        {/* Step 5: Spaces Ready (was step 3) */}
+        {step === 5 && (
           <div className="space-y-6 text-center animate-in fade-in duration-500">
             <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-status-success/10">
               <Sparkles size={32} className="text-status-success" />

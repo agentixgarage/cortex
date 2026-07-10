@@ -700,3 +700,21 @@ export interface ProminentEntity {
   docCount: number;
   isProminent: boolean;
 }
+
+// -------------------------------------------------------------------------
+// v1.2 #2: User profile (onboarding "About You" step)
+// Mirrors Rust `UserProfile` / `FamilyMember` in types.rs.
+// -------------------------------------------------------------------------
+
+export interface FamilyMember {
+  name: string;
+  relation: string;
+}
+
+export interface UserProfile {
+  displayName: string;
+  aliases: string[];
+  familyMembers: FamilyMember[];
+  countries: string[];
+  currencies: string[];
+}

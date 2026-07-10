@@ -67,6 +67,8 @@ import type {
   OntologyStoreSchema,
   PendingConsolidation,
   ProminentEntity,
+  // v1.2 #2: User profile (onboarding "About You")
+  UserProfile,
 } from "../lib/types";
 
 // --- Query Keys ---------------------------------------------------------------
@@ -120,6 +122,8 @@ export const queryKeys = {
   ontology: ["ontology"] as const,
   pendingConsolidation: ["ontology", "pending-consolidation"] as const,
   prominentEntities: ["entities", "prominent"] as const,
+  // --- v1.2 #2: User profile ---
+  userProfile: ["user-profile"] as const,
 };
 
 // --- Space Hooks --------------------------------------------------------------
@@ -1256,4 +1260,33 @@ export function useTopPersonId(): string | undefined {
   // get_entities_by_type already sorts by document_count desc, but be defensive
   const top = [...persons].sort((a, b) => b.documentCount - a.documentCount)[0];
   return top?.id;
+}
+
+// --- v1.2 #2: User profile (onboarding "About You") ---------------------
+
+const emptyUserProfile: UserProfile = {
+  displayName: "",
+  aliases: [],
+  familyMembers: [],
+  countries: [],
+  currencies: [],
+};
+
+export function useUserProfile() {
+  return useQuery({
+    queryKey: queryKeys.userProfile,
+    queryFn: () =>
+      tauriInvoke<UserProfile>("get_user_profile", undefined, () => emptyUserProfile),
+  });
+}
+
+export function useSaveUserProfile() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (profile: UserProfile) =>
+      tauriInvoke<null>("save_user_profile", { profile }, () => null),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.userProfile });
+    },
+  });
 }

@@ -1086,6 +1086,45 @@ pub struct StartChatArgs {
     pub filters: Option<SearchFilters>,
 }
 
+// -------------------------------------------------------------------------
+// v1.2 #2: User profile (onboarding "About You" step)
+// Optional, user-entered context that seeds retrieval + RAG chat with
+// knowledge Cortex cannot otherwise infer from documents alone (the user's
+// own name/aliases, family relationships, countries of residence/asset
+// ownership, preferred currencies). Entirely local, never leaves the
+// device except as part of prompts sent to whichever AI provider the user
+// has configured (same trust boundary as document content already sent
+// during Chat/Pass 2/Pass 3).
+// -------------------------------------------------------------------------
+
+/// One family member entry — free-form relation label (e.g. "spouse",
+/// "child", "parent", "sibling") so this works across cultures/family
+/// structures without a closed enum.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FamilyMember {
+    pub name: String,
+    pub relation: String,
+}
+
+/// Persisted user profile — sidecar JSON at `app_data_dir/user_profile.json`.
+/// Entirely optional; every field defaults to empty. Collected via the
+/// onboarding "About You" step (skippable) and editable later in Settings.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct UserProfile {
+    /// The user's own preferred display name.
+    pub display_name: String,
+    /// Alternate names/spellings the user is known by across documents
+    /// (e.g. legal name vs. commonly-used first name).
+    pub aliases: Vec<String>,
+    pub family_members: Vec<FamilyMember>,
+    /// ISO-ish free-form country names/codes the user has documents/assets in.
+    pub countries: Vec<String>,
+    /// Currency symbols or ISO codes the user's documents commonly use.
+    pub currencies: Vec<String>,
+}
+
 /// Provider slug for the local ruvllm (Metal-accelerated on-device) inference backend (D-03).
 ///
 /// NOTE: This constant was originally scoped to Plan 11.8-04, which had not yet executed
