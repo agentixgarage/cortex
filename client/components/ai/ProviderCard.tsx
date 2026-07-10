@@ -46,9 +46,12 @@ const ANTHROPIC_MODELS = [
 ] as const;
 
 const OPENAI_MODELS = [
-  { label: "GPT-5 Mini (fast)", value: "gpt-5-mini" },
-  { label: "GPT-5 (balanced)", value: "gpt-5" },
-  { label: "GPT-4o (legacy)", value: "gpt-4o" },
+  { label: "GPT-4o mini (fast)", value: "gpt-4o-mini" },
+  { label: "GPT-4o (balanced)", value: "gpt-4o" },
+  { label: "GPT-4.1 mini (fast)", value: "gpt-4.1-mini" },
+  { label: "GPT-4.1 (balanced)", value: "gpt-4.1" },
+  { label: "o1-mini (reasoning)", value: "o1-mini" },
+  { label: "o1 (reasoning, powerful)", value: "o1" },
 ] as const;
 
 const GEMINI_MODELS = [
@@ -57,7 +60,7 @@ const GEMINI_MODELS = [
 ] as const;
 
 const ANTHROPIC_DEFAULT_MODEL = "claude-haiku-4-5-20251001";
-const OPENAI_DEFAULT_MODEL = "gpt-5-mini";
+const OPENAI_DEFAULT_MODEL = "gpt-4o-mini";
 const GEMINI_DEFAULT_MODEL = "gemini-2.5-flash";
 const OLLAMA_DEFAULT_URL = "http://localhost:11434";
 

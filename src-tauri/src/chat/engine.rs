@@ -40,7 +40,7 @@ const COSINE_FLOOR: f32 = 0.20;
 
 /// The exact system prompt text from D-06 (11.7-CONTEXT.md). Preserve line
 /// breaks verbatim — this is sent as-is to every provider.
-pub const RAG_SYSTEM_PROMPT: &str = "You are a helpful assistant answering questions about the user's personal documents. Be precise, concrete, and grounded.\n\nGeneral rules:\n- Answer using the numbered document excerpts below. Cite as [1], [2] matching the excerpts.\n- Reasonable inference IS allowed: use context clues (document titles, shared surnames, matching addresses, matching dates of birth, explicit relation words) to draw conclusions the document implies. When you infer rather than quote, say so briefly (\"appears to be…\", \"based on shared surname…\").\n- Extract concrete data (numbers, dates, addresses, amounts, names) directly from the excerpts. Read carefully — receipts, deeds, IDs, invoices, statements each contain distinct fields.\n- Never cite a source not in the list. Never invent numbers, dates, IDs, or names.\n- If the info is genuinely absent from all excerpts, say so explicitly. Do not pad the answer with unrelated content just because a document was retrieved.\n\nQuery-type handling:\n- Aggregate queries (\"how much total\", \"how many\", \"list all\"): iterate every relevant excerpt, sum/enumerate, then report per-doc breakdown + total. Preserve the exact currency symbol as it appears in the source (₹, $, £, €, ¥, etc.). Do not convert currencies or drop the symbol. If the amounts span multiple currencies, report each subtotal separately — never sum across currencies without saying so.\n- Year-specific queries (\"in 2020\", \"last year\", \"FY 2023-24\"): only include excerpts whose date/filename/content matches the asked year. Ignore other years even if they were retrieved.\n- Entity-scoped queries (\"for X vs Y\", \"in city Z\", \"for asset X\", \"about person Y\"): only include excerpts explicitly tied to the named entity. If an excerpt could be about either or neither, say so. Entities can be people, organizations, properties, vehicles, projects, accounts, or anything else that appears in the corpus.\n- Multi-jurisdiction queries: users may hold assets, documents, or transactions across multiple countries. Never assume a single jurisdiction. Preserve country-specific fields as-is (US SSN, India Aadhaar/PAN, UK NI, EU IBAN, etc.) and country-specific formats (currency symbols, date formats).\n- Follow-up queries (\"of that\", \"how much of that for X\", \"what about last year\"): treat the prior turn as context. If the current query is a filter on the previous answer's scope, apply that filter.\n- Comparison queries (\"which cost more\"): pull the compared numbers, state them, then answer.\n\nGrounding discipline:\n- If asked about a specific year and no retrieved excerpt is from that year, say \"I don't have documents for {year} in the retrieved excerpts\" rather than guessing.\n- If asked about an entity not present in any excerpt, say \"I don't have documents about {entity}\".\n- Never confuse document types: an income-tax return is not a property-tax receipt; an insurance policy is not an invoice.";
+pub const RAG_SYSTEM_PROMPT: &str = "You are a helpful assistant answering questions about the user's personal documents. Be precise, concrete, and grounded.\n\nGeneral rules:\n- Answer using the numbered document excerpts below. Cite as [1], [2] matching the excerpts.\n- Reasonable inference IS allowed: use context clues (document titles, shared surnames, matching addresses, matching dates of birth, explicit relation words) to draw conclusions the document implies. When you infer rather than quote, say so briefly (\"appears to be…\", \"based on shared surname…\").\n- Extract concrete data (numbers, dates, addresses, amounts, names) directly from the excerpts. Read carefully — receipts, deeds, IDs, invoices, statements each contain distinct fields.\n- Financial documents often have MULTIPLE similarly-named amount fields on the same page (e.g. \"Property Tax\" vs \"Net Tax to be Paid\" vs \"SWM Cess\" vs \"Total\"; \"Subtotal\" vs \"Total\"; \"Principal\" vs \"Interest\"). When the user asks for a SPECIFIC field by name, quote the line item whose label most closely matches — do not substitute a different total/subtotal field just because it appears nearby. If multiple candidate fields could match, list them separately with their exact labels rather than picking one silently.\n- Never cite a source not in the list. Never invent numbers, dates, IDs, or names.\n- If the info is genuinely absent from all excerpts, say so explicitly. Do not pad the answer with unrelated content just because a document was retrieved.\n\nQuery-type handling:\n- Aggregate queries (\"how much total\", \"how many\", \"list all\"): iterate every relevant excerpt, sum/enumerate, then report per-doc breakdown + total. Preserve the exact currency symbol as it appears in the source (₹, $, £, €, ¥, etc.). Do not convert currencies or drop the symbol. If the amounts span multiple currencies, report each subtotal separately — never sum across currencies without saying so.\n- Year-specific queries (\"in 2020\", \"last year\", \"FY 2023-24\"): only include excerpts whose date/filename/content matches the asked year. Ignore other years even if they were retrieved.\n- Entity-scoped queries (\"for X vs Y\", \"in city Z\", \"for asset X\", \"about person Y\"): only include excerpts explicitly tied to the named entity. If an excerpt could be about either or neither, say so. Entities can be people, organizations, properties, vehicles, projects, accounts, or anything else that appears in the corpus.\n- Multi-jurisdiction queries: users may hold assets, documents, or transactions across multiple countries. Never assume a single jurisdiction. Preserve country-specific fields as-is (US SSN, India Aadhaar/PAN, UK NI, EU IBAN, etc.) and country-specific formats (currency symbols, date formats).\n- Follow-up queries (\"of that\", \"how much of that for X\", \"what about last year\"): treat the prior turn as context. If the current query is a filter on the previous answer's scope, apply that filter.\n- Comparison queries (\"which cost more\"): pull the compared numbers, state them, then answer.\n\nGrounding discipline:\n- If asked about a specific year and no retrieved excerpt is from that year, say \"I don't have documents for {year} in the retrieved excerpts\" rather than guessing.\n- If asked about an entity not present in any excerpt, say \"I don't have documents about {entity}\".\n- Never confuse document types: an income-tax return is not a property-tax receipt; an insurance policy is not an invoice.\n- The same source document may appear multiple times in the numbered excerpts (different chunks of one long file). Do NOT describe these as separate documents/receipts/events — check the filename/title before claiming there are multiple distinct records. If two excerpts share a title, treat them as ONE source.";
 
 /// Canned answer returned when no chunk clears the cosine floor (D-03).
 const NO_MATCH_ANSWER: &str = "I couldn't find anything relevant in your library.";
@@ -543,10 +543,19 @@ impl ChatEngine {
         }
 
         if let Some(last_a) = history.iter().rev().find(|m| m.role == ChatRole::Assistant) {
-            // Keep only first 400 chars of last assistant answer to avoid
-            // drowning the query embedding.
-            let a: String = last_a.content.chars().take(400).collect();
-            parts.push(a);
+            // Skip the canned "not found" answer entirely — it carries zero
+            // retrieval signal and, worse, actively dilutes the embedding
+            // away from the topic (real bug: a "not found" answer followed
+            // by a short correction like "the first source has it" was
+            // scoring below the cosine floor because 8 words of canned
+            // boilerplate outweighed 6 words of actual signal).
+            let is_canned = last_a.content.trim() == NO_MATCH_ANSWER;
+            if !is_canned {
+                // Keep only first 400 chars of last assistant answer to avoid
+                // drowning the query embedding.
+                let a: String = last_a.content.chars().take(400).collect();
+                parts.push(a);
+            }
         }
 
         parts.push(current.trim().to_string());
@@ -568,7 +577,7 @@ impl ChatEngine {
 
         let mut years: Vec<String> = Vec::new();
         for c in citations {
-            for y in Self::find_years(&c.doc_title) {
+            for y in Self::find_years_all(&c.doc_title) {
                 if !years.contains(&y) {
                     years.push(y);
                 }
@@ -672,6 +681,92 @@ impl ChatEngine {
         }
         flush(run_start, s.len(), &mut years);
 
+        years
+    }
+
+    /// Find Indian-fiscal-year short-form year pairs like "25_26", "19-20",
+    /// "20-21" — extremely common in receipt/tax-document filenames
+    /// (`Receipt_25_26.pdf`, `Receipt_19-20.pdf`). A plain `find_years` scan
+    /// never catches these since neither half is a 4-digit run.
+    ///
+    /// Pattern: two adjacent 2-digit runs separated by exactly one `-` or
+    /// `_`, where the second is the first plus one (mod 100 — handles the
+    /// "99_00" century-rollover edge case). Both halves are windowed to a
+    /// full year via the standard 2000+YY (YY<=68) / 1900+YY (YY>68) rule
+    /// and returned — a query for either the start or end calendar year of
+    /// the fiscal year should match.
+    fn find_fy_short_years(s: &str) -> Vec<String> {
+        let bytes = s.as_bytes();
+        let mut runs: Vec<(usize, usize, &str)> = Vec::new();
+        let mut run_start: Option<usize> = None;
+
+        for (i, b) in bytes.iter().enumerate() {
+            if b.is_ascii_digit() {
+                if run_start.is_none() {
+                    run_start = Some(i);
+                }
+            } else if let Some(st) = run_start {
+                runs.push((st, i, &s[st..i]));
+                run_start = None;
+            }
+        }
+        if let Some(st) = run_start {
+            runs.push((st, s.len(), &s[st..]));
+        }
+
+        let to_full_year = |yy: u32| -> String {
+            if yy <= 68 {
+                format!("20{:02}", yy)
+            } else {
+                format!("19{:02}", yy)
+            }
+        };
+
+        let mut years: Vec<String> = Vec::new();
+        for pair in runs.windows(2) {
+            let (a_start, a_end, a_val) = pair[0];
+            let (b_start, _b_end, b_val) = pair[1];
+            if a_val.len() != 2 || b_val.len() != 2 {
+                continue;
+            }
+            if b_start != a_end + 1 {
+                continue;
+            }
+            let sep = bytes[a_end] as char;
+            if sep != '-' && sep != '_' {
+                continue;
+            }
+            let a_num: u32 = match a_val.parse() {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+            let b_num: u32 = match b_val.parse() {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+            if (a_num + 1) % 100 != b_num {
+                continue;
+            }
+            for full in [to_full_year(a_num), to_full_year(b_num)] {
+                if !years.contains(&full) {
+                    years.push(full);
+                }
+            }
+        }
+        years
+    }
+
+    /// Union of `find_years` (plain 4-digit) and `find_fy_short_years`
+    /// (Indian FY short-form) — the single entry point doc-side year
+    /// detection should use, so a filename like `Receipt_25_26.pdf` and a
+    /// query like "in 2025" are recognized as the same year.
+    fn find_years_all(s: &str) -> Vec<String> {
+        let mut years = Self::find_years(s);
+        for y in Self::find_fy_short_years(s) {
+            if !years.contains(&y) {
+                years.push(y);
+            }
+        }
         years
     }
 
@@ -817,7 +912,7 @@ impl ChatEngine {
             let mut year_boost: f32 = 0.0;
             if !query_years.is_empty() {
                 let hay = format!("{} {}", doc_title, doc_path);
-                let doc_years: Vec<String> = Self::find_years(&hay);
+                let doc_years: Vec<String> = Self::find_years_all(&hay);
                 let matches_query_year = query_years.iter().any(|qy| doc_years.contains(qy));
                 if matches_query_year {
                     year_boost = 0.15;
@@ -997,6 +1092,52 @@ mod tests {
         assert_eq!(answer_or_canned(0.9), None);
     }
 
+    // ── build_retrieval_query: canned-answer pollution fix ──
+    // Real accuracy bug: a "not found" turn followed by a short correction
+    // ("the first source has it") scored below the cosine floor because the
+    // canned boilerplate outweighed the actual signal in the augmented query.
+
+    fn make_msg(role: ChatRole, content: &str) -> ChatMessage {
+        ChatMessage {
+            id: "mid-test".to_string(),
+            role,
+            content: content.to_string(),
+            citations: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_build_retrieval_query_excludes_canned_no_match_answer() {
+        let history = vec![
+            make_msg(ChatRole::User, "how much property tax in 2025?"),
+            make_msg(ChatRole::Assistant, NO_MATCH_ANSWER),
+        ];
+        let q = ChatEngine::build_retrieval_query(&history, "the first source has it");
+        assert!(!q.contains(NO_MATCH_ANSWER));
+    }
+
+    #[test]
+    fn test_build_retrieval_query_includes_real_assistant_answer() {
+        let history = vec![
+            make_msg(ChatRole::User, "how much property tax?"),
+            make_msg(ChatRole::Assistant, "Property tax was Rs. 5864.00 per the receipt."),
+        ];
+        let q = ChatEngine::build_retrieval_query(&history, "and for last year?");
+        assert!(q.contains("5864"));
+    }
+
+    #[test]
+    fn test_build_retrieval_query_includes_recent_user_turns_and_current() {
+        let history = vec![
+            make_msg(ChatRole::User, "first question about receipts"),
+            make_msg(ChatRole::Assistant, "some real answer"),
+        ];
+        let q = ChatEngine::build_retrieval_query(&history, "current question");
+        assert!(q.contains("first question about receipts"));
+        assert!(q.contains("current question"));
+    }
+
     // ── generate_suggestions (v1.2 #1: Chat suggestions) ──
 
     fn make_citation(index: u32, doc_title: &str) -> Citation {
@@ -1109,6 +1250,90 @@ mod tests {
     #[test]
     fn test_find_years_no_years_present() {
         assert!(ChatEngine::find_years("no dates here at all").is_empty());
+    }
+
+    // ── find_fy_short_years / find_years_all: Indian FY short-form filenames ──
+    // Root-cause fix for a real accuracy bug: "Receipt_25_26.pdf",
+    // "Receipt_19-20.pdf" etc. carry NO plain 4-digit year, so a query for
+    // "2025" never matched the document actually containing that year's data.
+
+    #[test]
+    fn test_find_fy_short_years_underscore() {
+        let years = ChatEngine::find_fy_short_years("Receipt_25_26.pdf");
+        assert!(years.contains(&"2025".to_string()));
+        assert!(years.contains(&"2026".to_string()));
+    }
+
+    #[test]
+    fn test_find_fy_short_years_hyphen() {
+        let years = ChatEngine::find_fy_short_years("Receipt_19-20.pdf");
+        assert!(years.contains(&"2019".to_string()));
+        assert!(years.contains(&"2020".to_string()));
+    }
+
+    #[test]
+    fn test_find_fy_short_years_multiple_filenames() {
+        assert!(ChatEngine::find_fy_short_years("Receipt_20-21.pdf").contains(&"2020".to_string()));
+        assert!(ChatEngine::find_fy_short_years("Receipt_18_19.pdf").contains(&"2018".to_string()));
+        assert!(ChatEngine::find_fy_short_years("Receipt_21-22.pdf").contains(&"2021".to_string()));
+        assert!(ChatEngine::find_fy_short_years("Receipt_22_23-name correction.pdf").contains(&"2022".to_string()));
+    }
+
+    #[test]
+    fn test_find_fy_short_years_rejects_non_consecutive() {
+        // "12_45" is not a consecutive-year pair — must not match.
+        assert!(ChatEngine::find_fy_short_years("Invoice_12_45.pdf").is_empty());
+    }
+
+    #[test]
+    fn test_find_fy_short_years_rejects_non_adjacent_separator() {
+        // Digits separated by more than one char, or a letter, must not match.
+        assert!(ChatEngine::find_fy_short_years("Invoice 25 x 26.pdf").is_empty());
+    }
+
+    #[test]
+    fn test_find_fy_short_years_century_rollover() {
+        // FY 1999-2000 style short form: "99_00" — must wrap correctly.
+        let years = ChatEngine::find_fy_short_years("Archive_99_00.pdf");
+        assert!(years.contains(&"1999".to_string()));
+        assert!(years.contains(&"2000".to_string()));
+    }
+
+    #[test]
+    fn test_find_fy_short_years_ignores_plain_4digit_year() {
+        // A plain 4-digit year must not be misparsed as an FY pair.
+        assert!(ChatEngine::find_fy_short_years("Receipt_2020.pdf").is_empty());
+    }
+
+    #[test]
+    fn test_find_years_all_combines_both_kinds() {
+        // Plain 4-digit AND FY-short-form in the same string.
+        let years = ChatEngine::find_years_all("Report_2020_covers_FY_25_26.pdf");
+        assert!(years.contains(&"2020".to_string()));
+        assert!(years.contains(&"2025".to_string()));
+        assert!(years.contains(&"2026".to_string()));
+    }
+
+    #[test]
+    fn test_find_years_all_real_world_receipt_filenames() {
+        // Exact filenames from the reported accuracy bug — a query for
+        // "2025" must now match Receipt_25_26.pdf.
+        for (filename, expect_year) in [
+            ("Receipt_25_26.pdf", "2025"),
+            ("Receipt_19-20.pdf", "2019"),
+            ("Receipt_20-21.pdf", "2020"),
+            ("Receipt_18_19.pdf", "2018"),
+            ("Receipt_21-22.pdf", "2021"),
+        ] {
+            let years = ChatEngine::find_years_all(filename);
+            assert!(
+                years.contains(&expect_year.to_string()),
+                "{} should match year {}, got {:?}",
+                filename,
+                expect_year,
+                years
+            );
+        }
     }
 
     // ── build_system_prompt (v1.2 #2: onboarding "About You" → RAG context) ──

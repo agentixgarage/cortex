@@ -21,8 +21,8 @@ type Provider = (typeof PROVIDERS)[number];
 // Used for the D-30 provider-switch toast copy.
 const PROVIDER_DEFAULT_MODEL_DISPLAY: Record<string, string> = {
   anthropic: "Claude Haiku 4.5",
-  "openai-codex": "GPT-5 mini",
-  openai: "GPT-5 mini",
+  "openai-codex": "GPT-4o mini",
+  openai: "GPT-4o mini",
   gemini: "Gemini 2.5 Flash",
 };
 

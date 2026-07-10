@@ -378,9 +378,10 @@ impl Pass2LlmRefiner {
             "anthropic" => "claude-haiku-4-5-20251001",
             // WR-07 fix: "openai" slug was missing a default, causing the skip-gate
             // to fire for any user who selected OpenAI but did not explicitly save
-            // an extraction model. Frontend PROVIDER_DEFAULT_MODEL["openai"] = "gpt-5-mini"
-            // so align Rust default with the UI default.
-            "openai" | "openai-codex" => "gpt-5-mini",
+            // an extraction model. gpt-5 is not valid via the ChatGPT Codex OAuth
+            // backend (openai-codex); gpt-4o-mini is broadly available on both
+            // the direct API-key path and via ChatGPT subscriptions.
+            "openai" | "openai-codex" => "gpt-4o-mini",
             "gemini" => "gemini-2.5-flash",
             _ => "", // Ollama + unknown providers: no default
         }
@@ -756,7 +757,7 @@ mod tests {
 
     #[test]
     fn test_pick_model_default_openai_codex() {
-        assert_eq!(Pass2LlmRefiner::pick_model_default("openai-codex"), "gpt-5-mini");
+        assert_eq!(Pass2LlmRefiner::pick_model_default("openai-codex"), "gpt-4o-mini");
     }
 
     #[test]

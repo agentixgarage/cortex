@@ -25,7 +25,10 @@ import { useProviders, useSaveSetupToken, useConnectProvider } from "@/hooks/use
 // ---------------------------------------------------------------------------
 
 const ANTHROPIC_DEFAULT_MODEL = "claude-haiku-4-5-20251001";
-const OPENAI_DEFAULT_MODEL = "gpt-5-mini";
+// Direct OpenAI API key connect (NOT ChatGPT/Codex OAuth — see ai/service.rs
+// for the separate openai-codex model restriction). gpt-4o-mini is broadly
+// available on api.openai.com with a real API key.
+const OPENAI_DEFAULT_MODEL = "gpt-4o-mini";
 const GEMINI_DEFAULT_MODEL = "gemini-2.5-flash";
 const OLLAMA_DEFAULT_URL = "http://localhost:11434";
 const OLLAMA_DEFAULT_MODEL = "llama3";
