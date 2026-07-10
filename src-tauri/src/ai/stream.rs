@@ -680,7 +680,7 @@ pub fn codex_chat_stream(
         let status = res.status().as_u16();
         if status != 200 {
             let text = res.text().await.unwrap_or_default();
-            yield StreamChunk::Error { message: format!("ChatGPT Codex error ({}): {}", status, text) };
+            yield StreamChunk::Error { message: crate::ai::openai::map_codex_error(status, &text) };
             return;
         }
 

@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { Send, Loader2, MessageSquarePlus, Trash2, FileText } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { tauriInvoke, isTauri } from "@/lib/tauri";
@@ -404,9 +406,15 @@ function MessageBubble({ message }: { message: ChatMessage }) {
             : "bg-muted text-foreground",
         )}
       >
-        <div className="whitespace-pre-wrap">{message.content || (
-          !isUser && <span className="text-muted-foreground">…</span>
-        )}</div>
+        {isUser ? (
+          <div className="whitespace-pre-wrap">{message.content}</div>
+        ) : message.content ? (
+          <div className="prose prose-sm prose-invert dark:prose-invert max-w-none prose-p:my-2 prose-ul:my-2 prose-ol:my-2 prose-headings:my-2 prose-headings:text-foreground prose-strong:text-foreground prose-a:text-primary">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+          </div>
+        ) : (
+          <span className="text-muted-foreground">…</span>
+        )}
         {message.citations && message.citations.length > 0 && (
           <div className="mt-3 space-y-1 border-t border-border/50 pt-2">
             <p className="text-xs font-semibold text-muted-foreground">Sources:</p>

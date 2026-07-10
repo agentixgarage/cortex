@@ -52,13 +52,20 @@ pub fn build_codex_request(
         ("Content-Type".to_string(), "application/json".to_string()),
     ];
 
+    // Content part type depends on role: "input_text" for anything the
+    // caller is sending TO the model (user/developer/system-ish turns),
+    // "output_text" for prior ASSISTANT turns being replayed as history —
+    // the API rejects input_text on assistant-role items:
+    // {"message":"Invalid value: 'input_text'. Supported values are:
+    // 'output_text' and 'refusal'.","param":"input[1].content[0]"}.
     let input: Vec<Value> = messages
         .iter()
         .map(|m| {
+            let content_type = if m.role == "assistant" { "output_text" } else { "input_text" };
             json!({
                 "type": "message",
                 "role": m.role,
-                "content": [{"type": "input_text", "text": m.content}],
+                "content": [{"type": content_type, "text": m.content}],
             })
         })
         .collect();
@@ -110,7 +117,7 @@ pub fn build_codex_stream_request(
 }
 
 /// Map ChatGPT backend HTTP status codes to user-friendly error messages.
-fn map_codex_error(status: u16, body: &str) -> String {
+pub(crate) fn map_codex_error(status: u16, body: &str) -> String {
     match status {
         401 => "ChatGPT token invalid or expired. Please sign in again via Settings.".to_string(),
         403 => "ChatGPT token does not have the required permissions.".to_string(),
@@ -127,14 +134,22 @@ fn map_codex_error(status: u16, body: &str) -> String {
     }
 }
 
-/// Send a chat request to the ChatGPT/Codex Responses API.
+/// Send a "blocking" (single accumulated response) chat request to the
+/// ChatGPT/Codex Responses API.
 ///
 /// Uses a Bearer token from the Codex PKCE OAuth flow (NOT an API key).
 /// Endpoint: https://chatgpt.com/backend-api/codex/responses
-/// Wire format: OpenAI Responses API (non-streaming, stream=false)
+///
+/// This backend has NO non-streaming mode — a request with `stream: false`
+/// is rejected outright: `{"detail":"Stream must be set to true"}`. Callers
+/// that want a single accumulated response (Pass 2/3 entity extraction,
+/// which call this function, not the streaming path) still get one: this
+/// drives `codex_chat_stream` to completion internally and concatenates
+/// every token delta before returning.
 ///
 /// This function must NOT be called for "openai" (API-key) credentials —
-/// those must use openai_chat() (api.openai.com/v1/chat/completions).
+/// those must use openai_chat() (api.openai.com/v1/chat/completions), which
+/// DOES support non-streaming mode.
 pub async fn codex_chat(
     token: &str,
     model: &str,
@@ -142,52 +157,37 @@ pub async fn codex_chat(
     system: &str,
     messages: &[ServiceMessage],
 ) -> Result<AIServiceResponse, String> {
-    let (url, headers, body) = build_codex_request(token, model, max_tokens, system, messages);
+    use crate::ai::stream::{codex_chat_stream, StreamChunk};
+    use futures::StreamExt;
 
-    let client = reqwest::Client::new();
-    let mut req = client.post(&url);
-    for (k, v) in &headers {
-        req = req.header(k.as_str(), v.as_str());
-    }
+    let mut stream = codex_chat_stream(
+        token.to_string(),
+        model.to_string(),
+        max_tokens,
+        system.to_string(),
+        messages.to_vec(),
+    );
 
-    let res = req
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| {
-            if e.is_timeout() || e.is_connect() {
-                "Could not reach ChatGPT — check your connection.".to_string()
-            } else {
-                format!("Network error: {}", e)
+    let mut content = String::new();
+    let mut resolved_model = model.to_string();
+    let mut input_tokens = None;
+    let mut output_tokens = None;
+
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            StreamChunk::Token { token, .. } => content.push_str(&token),
+            StreamChunk::Done { input_tokens: it, output_tokens: ot, model: m } => {
+                input_tokens = it;
+                output_tokens = ot;
+                resolved_model = m;
             }
-        })?;
-
-    let status = res.status().as_u16();
-    let text = res.text().await.map_err(|e| format!("Read error: {}", e))?;
-
-    if status != 200 {
-        return Err(map_codex_error(status, &text));
+            StreamChunk::Error { message } => return Err(message),
+        }
     }
-
-    let json: Value = serde_json::from_str(&text).map_err(|e| format!("Parse error: {}", e))?;
-
-    // Responses API response shape: { "output": [{"type":"message","content":[{"type":"output_text","text":"..."}]}] }
-    // Extract text from the first output message's first content item.
-    let content = json["output"]
-        .as_array()
-        .and_then(|arr| arr.iter().find(|item| item["type"] == "message"))
-        .and_then(|msg| msg["content"].as_array())
-        .and_then(|parts| parts.iter().find(|p| p["type"] == "output_text"))
-        .and_then(|part| part["text"].as_str())
-        .unwrap_or("")
-        .to_string();
-
-    let input_tokens = json["usage"]["input_tokens"].as_u64();
-    let output_tokens = json["usage"]["output_tokens"].as_u64();
 
     Ok(AIServiceResponse {
         content,
-        model: json["model"].as_str().unwrap_or(model).to_string(),
+        model: resolved_model,
         input_tokens,
         output_tokens,
     })
@@ -486,6 +486,34 @@ mod tests {
         assert!(body.get("parallel_tool_calls").is_some());
         assert!(body.get("reasoning").is_some());
         assert!(body.get("instructions").is_some());
+    }
+
+    #[test]
+    fn test_build_codex_request_assistant_role_uses_output_text() {
+        // Real bug: the API rejects input_text on assistant-role history
+        // items — {"message":"Invalid value: 'input_text'. Supported
+        // values are: 'output_text' and 'refusal'.","param":"input[1].content[0]"}.
+        // Surfaced by the multi-turn conversation-history feature, which
+        // replays prior assistant answers as message history.
+        let msgs = vec![
+            ServiceMessage { role: "user".to_string(), content: "q1".to_string() },
+            ServiceMessage { role: "assistant".to_string(), content: "a1".to_string() },
+            ServiceMessage { role: "user".to_string(), content: "q2".to_string() },
+        ];
+        let (_, _, body) = build_codex_request("tok", "gpt-5.6-terra", 100, "sys", &msgs);
+        let input = body["input"].as_array().unwrap();
+
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[0]["content"][0]["type"], "input_text");
+
+        assert_eq!(input[1]["role"], "assistant");
+        assert_eq!(
+            input[1]["content"][0]["type"], "output_text",
+            "assistant-role history items must use output_text, not input_text"
+        );
+
+        assert_eq!(input[2]["role"], "user");
+        assert_eq!(input[2]["content"][0]["type"], "input_text");
     }
 
     // --- Plan 11.7-04 Task 3: streaming request builder tests ---
