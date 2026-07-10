@@ -157,16 +157,25 @@ impl TripleStore {
         self.triples.values()
     }
 
-    /// Internal helper: validate, assign id/created_at defaults, and
-    /// upsert a single triple into `triples` + all three indices.
+    /// Internal helper: validate (via a caller-supplied predicate-acceptance
+    /// check), assign id/created_at defaults, and upsert a single triple
+    /// into `triples` + all three indices.
+    ///
+    /// `insert_one` (fixed static seed vocabulary) and `insert_one_with_vocab`
+    /// (seed + adaptive/corpus-seeded vocabulary) are both thin wrappers
+    /// around this shared implementation.
     ///
     /// Upsert semantics (D-12): if a triple with the same
     /// (subject_id, predicate, object_id) already exists AND the stored
     /// triple has `user_added == true`, the stored triple's `user_added`
     /// flag is preserved — only `doc_ids` are merged in. Otherwise the
     /// incoming triple replaces/creates the entry.
-    pub fn insert_one(&mut self, mut triple: Triple) -> Result<String, String> {
-        if !is_valid_predicate(&triple.predicate) {
+    fn insert_one_checked(
+        &mut self,
+        mut triple: Triple,
+        predicate_ok: impl Fn(&str) -> bool,
+    ) -> Result<String, String> {
+        if !predicate_ok(&triple.predicate) {
             return Err(format!("invalid predicate: {}", triple.predicate));
         }
         if triple.subject_id == triple.object_id {
@@ -224,6 +233,34 @@ impl TripleStore {
         self.triples.insert(id.clone(), triple.clone());
         self.add_to_indices(&triple);
         Ok(id)
+    }
+
+    /// Validate + upsert a single triple against the fixed static
+    /// `PREDICATE_VOCABULARY` (21 seed predicates). Used for manual triples
+    /// and internal auto-inverse/symmetric writes, where predicates are
+    /// always seed predicates by construction.
+    pub fn insert_one(&mut self, triple: Triple) -> Result<String, String> {
+        self.insert_one_checked(triple, is_valid_predicate)
+    }
+
+    /// Same as `insert_one` but additionally accepts any predicate present
+    /// in `extra_vocab` — used for Pass 3 upserts, where the OntologyStore's
+    /// runtime-effective vocabulary (seed + corpus-seeded + adaptive +
+    /// manual, Phase 11.6) may include predicates beyond the static
+    /// `PREDICATE_VOCABULARY`. Fixes a real bug: Pass 3's own
+    /// `validate_and_normalize` already accepts these predicates (it's
+    /// passed the same effective vocabulary), so a corpus-seeded/adaptive
+    /// predicate would pass extraction validation only to be rejected here
+    /// at the final storage step — `{"detail":"invalid predicate:
+    /// gst_registered_as"}` — permanently stalling that doc's Pass 3.
+    pub fn insert_one_with_vocab(
+        &mut self,
+        triple: Triple,
+        extra_vocab: &[String],
+    ) -> Result<String, String> {
+        self.insert_one_checked(triple, |p| {
+            is_valid_predicate(p) || extra_vocab.iter().any(|v| v == p)
+        })
     }
 
     /// Add a single triple's id to all three indices.
@@ -348,6 +385,55 @@ impl TripleStore {
             }
         }
         Ok(ids)
+    }
+
+    /// Same as `upsert_from_doc` but validates predicates against
+    /// `extra_vocab` in addition to the static seed vocabulary (see
+    /// `insert_one_with_vocab`), and NEVER aborts the whole batch on one bad
+    /// triple — each triple is validated independently; a failing one is
+    /// logged and skipped so the rest of the doc's valid triples still land.
+    ///
+    /// Real bug this fixes: `upsert_from_doc`'s `?` propagation meant a
+    /// single invalid triple permanently stalled a doc's Pass 3 completion
+    /// (backfill leaves `entities_version` at 3.0 on any upsert error,
+    /// retrying — and re-failing on the exact same triple — every
+    /// subsequent backfill run). One observed cause: a self-referential
+    /// triple that Pass 3's own pre-filter (`validate_and_normalize`)
+    /// cannot catch, because it operates on raw `e_N` entity INDICES before
+    /// canonical-id resolution — two distinct indices can resolve to the
+    /// SAME canonical entity after alias merging (e.g. "Alex" and "Alex
+    /// Doe" both resolving to one Person), producing a subject==object
+    /// triple only visible after this function's own resolved-id check.
+    pub fn upsert_from_doc_with_vocab(
+        &mut self,
+        doc_id: &str,
+        incoming: Vec<Triple>,
+        extra_vocab: &[String],
+    ) -> Vec<String> {
+        let mut ids = Vec::with_capacity(incoming.len());
+        for mut t in incoming {
+            t.doc_ids = vec![doc_id.to_string()];
+            t.user_added = false;
+
+            match self.insert_one_with_vocab(t.clone(), extra_vocab) {
+                Ok(inserted) => {
+                    ids.push(inserted.clone());
+                    // Re-fetch the stored triple (it may carry merged doc_ids
+                    // or a preserved user_added flag) before propagating
+                    // auto-writes.
+                    if let Some(stored) = self.triples.get(&inserted).cloned() {
+                        self.apply_auto_writes(&stored);
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[triple_store] skipping invalid triple for doc {}: {} --{}--> {} ({})",
+                        doc_id, t.subject_id, t.predicate, t.object_id, e
+                    );
+                }
+            }
+        }
+        ids
     }
 
     /// Add a manual (user-authored) triple, called by the `add_manual_triple`
@@ -616,6 +702,98 @@ mod tests {
         let mut store = TripleStore::default();
         let result = store.insert_one(triple("ent-a", "owns", "ent-a"));
         assert!(result.is_err(), "self-referential triple must be rejected");
+    }
+
+    // === Adaptive-vocab upsert: real bug fix (corpus-seeded/adaptive
+    // predicates rejected at storage even though Pass 3 already validated
+    // them against the same effective vocabulary) ===
+
+    #[test]
+    fn test_insert_one_rejects_adaptive_predicate_without_vocab() {
+        let mut store = TripleStore::default();
+        let result = store.insert_one(triple("ent-a", "gst_registered_as", "ent-b"));
+        assert!(result.is_err(), "plain insert_one must still reject non-seed predicates");
+    }
+
+    #[test]
+    fn test_insert_one_with_vocab_accepts_extra_predicate() {
+        let mut store = TripleStore::default();
+        let extra_vocab = vec!["gst_registered_as".to_string()];
+        let result = store.insert_one_with_vocab(
+            triple("ent-a", "gst_registered_as", "ent-b"),
+            &extra_vocab,
+        );
+        assert!(result.is_ok(), "adaptive predicate present in extra_vocab must be accepted");
+    }
+
+    #[test]
+    fn test_insert_one_with_vocab_still_rejects_unknown_predicate() {
+        let mut store = TripleStore::default();
+        let extra_vocab = vec!["gst_registered_as".to_string()];
+        let result = store.insert_one_with_vocab(
+            triple("ent-a", "totally_made_up", "ent-b"),
+            &extra_vocab,
+        );
+        assert!(result.is_err(), "predicate absent from both seed AND extra_vocab must still be rejected");
+    }
+
+    #[test]
+    fn test_insert_one_with_vocab_still_accepts_seed_predicate() {
+        let mut store = TripleStore::default();
+        let extra_vocab: Vec<String> = vec![];
+        let result = store.insert_one_with_vocab(triple("ent-a", "owns", "ent-b"), &extra_vocab);
+        assert!(result.is_ok(), "seed predicates must still work with an empty extra_vocab");
+    }
+
+    #[test]
+    fn test_upsert_from_doc_with_vocab_skips_bad_triple_keeps_good_ones() {
+        // Real bug: upsert_from_doc's `?` propagation meant ONE invalid
+        // triple aborted the WHOLE batch, silently dropping otherwise-valid
+        // triples too. upsert_from_doc_with_vocab must not do this.
+        let mut store = TripleStore::default();
+        let incoming = vec![
+            triple("ent-a", "owns", "ent-b"),      // valid
+            triple("ent-c", "owns", "ent-c"),      // self-referential — must be skipped
+            triple("ent-d", "owns", "ent-e"),      // valid — must still land
+        ];
+        let ids = store.upsert_from_doc_with_vocab("doc-1", incoming, &[]);
+
+        assert_eq!(ids.len(), 2, "2 valid triples must be inserted despite 1 bad triple in the batch");
+        assert!(
+            store.get_by_entity("ent-a").iter().any(|t| t.predicate == "owns" && t.object_id == "ent-b"),
+            "first valid triple must have landed"
+        );
+        assert!(
+            store.get_by_entity("ent-d").iter().any(|t| t.predicate == "owns" && t.object_id == "ent-e"),
+            "second valid triple (after the bad one) must have landed"
+        );
+        assert!(
+            !store.get_by_entity("ent-c").iter().any(|t| t.subject_id == "ent-c" && t.object_id == "ent-c"),
+            "self-referential triple must never be stored"
+        );
+    }
+
+    #[test]
+    fn test_upsert_from_doc_with_vocab_uses_extra_vocab() {
+        let mut store = TripleStore::default();
+        let extra_vocab = vec!["gst_registered_as".to_string()];
+        let ids = store.upsert_from_doc_with_vocab(
+            "doc-1",
+            vec![triple("ent-a", "gst_registered_as", "ent-b")],
+            &extra_vocab,
+        );
+        assert_eq!(ids.len(), 1, "adaptive predicate must be accepted via upsert_from_doc_with_vocab");
+    }
+
+    #[test]
+    fn test_upsert_from_doc_with_vocab_never_panics_on_all_invalid() {
+        let mut store = TripleStore::default();
+        let incoming = vec![
+            triple("ent-a", "not_a_real_predicate", "ent-b"),
+            triple("ent-c", "owns", "ent-c"),
+        ];
+        let ids = store.upsert_from_doc_with_vocab("doc-1", incoming, &[]);
+        assert!(ids.is_empty(), "all-invalid batch returns empty ids, not a panic or Err");
     }
 
     /// Test 7: insert (A, owns, B) auto-writes (B, owned_by, A) via upsert_from_doc.

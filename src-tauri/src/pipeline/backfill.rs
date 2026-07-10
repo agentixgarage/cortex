@@ -557,49 +557,53 @@ async fn backfill_one_doc_async(
             Ok(Some((triples, new_predicates))) => {
                 // Upsert to TripleStore with doc_id provenance.
                 // First cleanup this doc's existing triples (re-index scenario), then upsert.
+                //
+                // Uses upsert_from_doc_with_vocab (not upsert_from_doc): the
+                // latter validates predicates against ONLY the static seed
+                // PREDICATE_VOCABULARY, rejecting any corpus-seeded/adaptive
+                // predicate that Pass 3's own extraction already validated
+                // against this same `vocabulary` — a real bug that silently
+                // broke the adaptive-ontology feature at the storage step.
+                // The _with_vocab variant also never aborts the whole batch
+                // on one bad triple (e.g. a self-referential triple from
+                // Pass-2 entity-alias collapse) — it skips just that triple
+                // and logs, so the doc's other valid triples still land and
+                // entities_version always advances once Pass 3 runs.
                 let ts_clone = triple_store.clone();
                 let doc_id_owned = doc_id.to_string();
                 let triples_owned = triples;
-                let upsert_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
+                let vocabulary_owned = vocabulary.clone();
+                tokio::task::spawn_blocking(move || {
                     let mut ts = ts_clone.blocking_lock();
                     ts.cleanup_doc(&doc_id_owned);
-                    ts.upsert_from_doc(&doc_id_owned, triples_owned)?;
-                    Ok(())
+                    ts.upsert_from_doc_with_vocab(&doc_id_owned, triples_owned, &vocabulary_owned);
                 })
                 .await
                 .map_err(|e| crate::error::AppError::Internal(format!("Pass 3 triple upsert join error: {}", e)))?;
 
-                match upsert_result {
-                    Ok(()) => {
-                        final_version = PASS3_TARGET_VERSION; // 3.5
+                final_version = PASS3_TARGET_VERSION; // 3.5
 
-                        // Phase 11.6 D-05/D-06: feed proposed new_predicates into the
-                        // OntologyStore pending queue. The store enforces the
-                        // min-support (>=2 distinct docs) promotion gate internally;
-                        // this call site only respects the caller-side
-                        // automatic_growth_enabled toggle (D-21).
-                        if !new_predicates.is_empty() {
-                            let now = chrono::Utc::now().to_rfc3339();
-                            let results = feed_new_predicates_to_ontology(
-                                ontology_store,
-                                &new_predicates,
-                                doc_id,
-                                &now,
-                            )
-                            .await;
-                            for (p, res) in new_predicates.iter().zip(results.iter()) {
-                                if matches!(res, PromoteResult::Promoted) {
-                                    eprintln!(
-                                        "[backfill] promoted new predicate '{}' after min-support met",
-                                        p.name
-                                    );
-                                }
-                            }
+                // Phase 11.6 D-05/D-06: feed proposed new_predicates into the
+                // OntologyStore pending queue. The store enforces the
+                // min-support (>=2 distinct docs) promotion gate internally;
+                // this call site only respects the caller-side
+                // automatic_growth_enabled toggle (D-21).
+                if !new_predicates.is_empty() {
+                    let now = chrono::Utc::now().to_rfc3339();
+                    let results = feed_new_predicates_to_ontology(
+                        ontology_store,
+                        &new_predicates,
+                        doc_id,
+                        &now,
+                    )
+                    .await;
+                    for (p, res) in new_predicates.iter().zip(results.iter()) {
+                        if matches!(res, PromoteResult::Promoted) {
+                            eprintln!(
+                                "[backfill] promoted new predicate '{}' after min-support met",
+                                p.name
+                            );
                         }
-                    }
-                    Err(e) => {
-                        eprintln!("[backfill] Pass 3 triple upsert failed for doc {}: {} — leaving at 3.0", doc_id, e);
-                        // final_version stays at 3.0; next backfill retries Pass 3
                     }
                 }
             }
