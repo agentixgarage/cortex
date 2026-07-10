@@ -40,7 +40,7 @@ const COSINE_FLOOR: f32 = 0.20;
 
 /// The exact system prompt text from D-06 (11.7-CONTEXT.md). Preserve line
 /// breaks verbatim — this is sent as-is to every provider.
-pub const RAG_SYSTEM_PROMPT: &str = "You are a helpful assistant answering questions about the user's personal documents. Be precise, concrete, and grounded.\n\nGeneral rules:\n- Answer using the numbered document excerpts below. Cite as [1], [2] matching the excerpts.\n- Reasonable inference IS allowed: use context clues (document titles, shared surnames, matching addresses, matching dates of birth, explicit relation words) to draw conclusions the document implies. When you infer rather than quote, say so briefly (\"appears to be…\", \"based on shared surname…\").\n- Extract concrete data (numbers, dates, addresses, amounts, names) directly from the excerpts. Read carefully — receipts, deeds, IDs, invoices, statements each contain distinct fields.\n- Financial documents often have MULTIPLE similarly-named amount fields on the same page (e.g. \"Property Tax\" vs \"Net Tax to be Paid\" vs \"SWM Cess\" vs \"Total\"; \"Subtotal\" vs \"Total\"; \"Principal\" vs \"Interest\"). When the user asks for a SPECIFIC field by name, quote the line item whose label most closely matches — do not substitute a different total/subtotal field just because it appears nearby. If multiple candidate fields could match, list them separately with their exact labels rather than picking one silently.\n- Never cite a source not in the list. Never invent numbers, dates, IDs, or names.\n- If the info is genuinely absent from all excerpts, say so explicitly. Do not pad the answer with unrelated content just because a document was retrieved.\n\nQuery-type handling:\n- Aggregate queries (\"how much total\", \"how many\", \"list all\"): iterate every relevant excerpt, sum/enumerate, then report per-doc breakdown + total. Preserve the exact currency symbol as it appears in the source (₹, $, £, €, ¥, etc.). Do not convert currencies or drop the symbol. If the amounts span multiple currencies, report each subtotal separately — never sum across currencies without saying so.\n- Year-specific queries (\"in 2020\", \"last year\", \"FY 2023-24\"): only include excerpts whose date/filename/content matches the asked year. Ignore other years even if they were retrieved.\n- Entity-scoped queries (\"for X vs Y\", \"in city Z\", \"for asset X\", \"about person Y\"): only include excerpts explicitly tied to the named entity. If an excerpt could be about either or neither, say so. Entities can be people, organizations, properties, vehicles, projects, accounts, or anything else that appears in the corpus.\n- Multi-jurisdiction queries: users may hold assets, documents, or transactions across multiple countries. Never assume a single jurisdiction. Preserve country-specific fields as-is (US SSN, India Aadhaar/PAN, UK NI, EU IBAN, etc.) and country-specific formats (currency symbols, date formats).\n- Follow-up queries (\"of that\", \"how much of that for X\", \"what about last year\"): treat the prior turn as context. If the current query is a filter on the previous answer's scope, apply that filter.\n- Comparison queries (\"which cost more\"): pull the compared numbers, state them, then answer.\n\nGrounding discipline:\n- If asked about a specific year and no retrieved excerpt is from that year, say \"I don't have documents for {year} in the retrieved excerpts\" rather than guessing.\n- If asked about an entity not present in any excerpt, say \"I don't have documents about {entity}\".\n- Never confuse document types: an income-tax return is not a property-tax receipt; an insurance policy is not an invoice.\n- The same source document may appear multiple times in the numbered excerpts (different chunks of one long file). Do NOT describe these as separate documents/receipts/events — check the filename/title before claiming there are multiple distinct records. If two excerpts share a title, treat them as ONE source.";
+pub const RAG_SYSTEM_PROMPT: &str = "You are a helpful assistant answering questions about the user's personal documents. Be precise, concrete, and grounded.\n\nGeneral rules:\n- Answer using the numbered document excerpts below. Cite as [1], [2] matching the excerpts.\n- Reasonable inference IS allowed: use context clues (document titles, shared surnames, matching addresses, matching dates of birth, explicit relation words) to draw conclusions the document implies. When you infer rather than quote, say so briefly (\"appears to be…\", \"based on shared surname…\").\n- Extract concrete data (numbers, dates, addresses, amounts, names) directly from the excerpts. Read carefully — receipts, deeds, IDs, invoices, statements each contain distinct fields.\n- Financial documents often have MULTIPLE similarly-named amount fields on the same page (e.g. \"Property Tax\" vs \"Net Tax to be Paid\" vs \"SWM Cess\" vs \"Total\"; \"Subtotal\" vs \"Total\"; \"Principal\" vs \"Interest\"). When the user asks for a SPECIFIC field by name, quote the line item whose label most closely matches — do not substitute a different total/subtotal field just because it appears nearby. If multiple candidate fields could match, list them separately with their exact labels rather than picking one silently.\n- Never cite a source not in the list. Never invent numbers, dates, IDs, or names.\n- If the info is genuinely absent from all excerpts, say so explicitly. Do not pad the answer with unrelated content just because a document was retrieved.\n\nQuery-type handling:\n- Aggregate queries (\"how much total\", \"how many\", \"list all\"): iterate every relevant excerpt, sum/enumerate, then report per-doc breakdown + total. Preserve the exact currency symbol as it appears in the source (₹, $, £, €, ¥, etc.). Do not convert currencies or drop the symbol. If the amounts span multiple currencies, report each subtotal separately — never sum across currencies without saying so.\n- Year-specific queries (\"in 2020\", \"last year\", \"FY 2023-24\"): only include excerpts whose date/filename/content matches the asked year. Ignore other years even if they were retrieved.\n- Entity-scoped queries (\"for X vs Y\", \"in city Z\", \"for asset X\", \"about person Y\"): only include excerpts explicitly tied to the named entity. If an excerpt could be about either or neither, say so. Entities can be people, organizations, properties, vehicles, projects, accounts, or anything else that appears in the corpus.\n- Multi-jurisdiction queries: users may hold assets, documents, or transactions across multiple countries. Never assume a single jurisdiction. Preserve country-specific fields as-is (US SSN, India Aadhaar/PAN, UK NI, EU IBAN, etc.) and country-specific formats (currency symbols, date formats).\n- Follow-up queries (\"of that\", \"how much of that for X\", \"what about last year\"): treat the prior turn as context. If the current query is a filter on the previous answer's scope, apply that filter.\n- Comparison queries (\"which cost more\"): pull the compared numbers, state them, then answer.\n\nGrounding discipline:\n- If asked about a specific year and no retrieved excerpt is from that year, say \"I don't have documents for {year} in the retrieved excerpts\" rather than guessing.\n- If asked about an entity not present in any excerpt, say \"I don't have documents about {entity}\".\n- Never confuse document types: an income-tax return is not a property-tax receipt; an insurance policy is not an invoice.\n- The same source document may appear multiple times in the numbered excerpts (different chunks of one long file). Do NOT describe these as separate documents/receipts/events — check the filename/title before claiming there are multiple distinct records. If two excerpts share a title, treat them as ONE source.\n- If a trailing note lists documents that matched but had no readable text (scanned images pending OCR), and the user's question is about one of those documents, say so directly (\"I found a document titled {name} but couldn't read its content — it may be a scanned image; OCR isn't supported yet\") rather than answering from an unrelated numbered excerpt just because it happens to share a topic (e.g. don't answer a passport question from an insurance receipt just because both contain personal-identity fields).";
 
 /// Canned answer returned when no chunk clears the cosine floor (D-03).
 const NO_MATCH_ANSWER: &str = "I couldn't find anything relevant in your library.";
@@ -202,6 +202,31 @@ pub fn build_rag_prompt(_system: &str, numbered_docs: &[(u32, &str, &str)], quer
     out
 }
 
+/// Append a note listing documents that were found by the initial HNSW pass
+/// but excluded from the prompt because their extracted text was near-empty
+/// (< 20 chars — almost always a scanned/image-only PDF with no OCR yet,
+/// ROADMAP.md #4b). Returns `base` unchanged when `unreadable_titles` is
+/// empty.
+///
+/// Fixes a real accuracy bug: without this, an unreadable doc that IS the
+/// actually-relevant one (e.g. a scanned passport) silently vanishes from
+/// the candidate pool, and the LLM confidently cites the next-best
+/// wrong-domain match instead (observed: asking about a passport surfaced
+/// LIC insurance receipts). The note lets the LLM say "found but
+/// unreadable" instead of fabricating relevance from an unrelated doc.
+pub fn append_unreadable_note(base: &str, unreadable_titles: &[String]) -> String {
+    if unreadable_titles.is_empty() {
+        return base.to_string();
+    }
+    format!(
+        "{}\n\n(Note: these additional documents matched by filename/embedding \
+         but had no readable text extracted — likely scanned images pending \
+         OCR support, NOT relevant-but-omitted content: {})",
+        base,
+        unreadable_titles.join(", ")
+    )
+}
+
 /// Returns the canned "not found" answer when `best_score` is below the
 /// cosine floor (D-03); `None` when the score clears the floor and the LLM
 /// should be called.
@@ -274,7 +299,7 @@ impl ChatEngine {
 
         // ── Retrieval (spawn_blocking: std::sync::Mutex guards must not cross .await) ──
         let retrieval_query = augmented_query.clone();
-        let retrieval = tokio::task::spawn_blocking(move || {
+        let (retrieval, unreadable_titles) = tokio::task::spawn_blocking(move || {
             Self::retrieve_and_rerank(
                 &retrieval_query,
                 filters.as_ref(),
@@ -293,7 +318,21 @@ impl ChatEngine {
         let best_score = if retrieval.is_empty() { 0.0 } else { best_score };
 
         // ── Below-floor branch (D-03): canned answer, no LLM call ──
-        if let Some(canned) = answer_or_canned(best_score) {
+        if let Some(canned_base) = answer_or_canned(best_score) {
+            // Real fix: if the only candidates were unreadable (scanned
+            // PDFs with no OCR yet — ROADMAP #4b), say so instead of a
+            // generic "nothing found" that gives the user zero signal
+            // about WHY (they saw the file get indexed, so "nothing
+            // found" reads as a bug, not a missing-OCR limitation).
+            let canned = if unreadable_titles.is_empty() {
+                canned_base.to_string()
+            } else {
+                format!(
+                    "{} I did find document(s) that seem related by name — {} — but couldn't extract readable text from them. This usually means they're scanned images rather than text PDFs; OCR for scanned documents isn't supported yet.",
+                    canned_base,
+                    unreadable_titles.join(", ")
+                )
+            };
             let _ = app.emit(
                 "chat-stream-token",
                 ChatStreamTokenPayload {
@@ -319,7 +358,7 @@ impl ChatEngine {
                 &app_data_dir,
                 &session_id,
                 &assistant_message_id,
-                canned,
+                &canned,
                 None,
             )
             .await;
@@ -369,7 +408,10 @@ impl ChatEngine {
             build_system_prompt(&profile)
         };
 
-        let prompt = build_rag_prompt(&system_prompt, &numbered_docs_refs, &query);
+        let prompt = {
+            let base = build_rag_prompt(&system_prompt, &numbered_docs_refs, &query);
+            append_unreadable_note(&base, &unreadable_titles)
+        };
 
         // Build message list with recent history so LLM sees the conversation
         // arc, not just the current query in isolation. History is user↔assistant
@@ -855,7 +897,7 @@ impl ChatEngine {
         engine: &Arc<Mutex<CortexEngine>>,
         embedding_service: &Arc<EmbeddingService>,
         entity_store: &Arc<std::sync::Mutex<EntityStore>>,
-    ) -> Result<Vec<(String, String, Chunk, f32)>, String> {
+    ) -> Result<(Vec<(String, String, Chunk, f32)>, Vec<String>), String> {
         let query_vec = embedding_service
             .embed_text(query)
             .map_err(|e| e.to_string())?;
@@ -936,6 +978,13 @@ impl ChatEngine {
         };
 
         let mut all_candidates: Vec<(String, String, Chunk, f32)> = Vec::new();
+        // Titles of docs that HNSW surfaced as relevant by embedding but
+        // whose text could not be extracted (near-empty — almost always a
+        // scanned/image-only PDF with no OCR yet, ROADMAP.md #4b). Without
+        // this, these docs are silently dropped and the LLM has no way to
+        // know they exist — it then confidently cites the next-best
+        // (wrong-domain) match instead of saying "found but unreadable".
+        let mut unreadable_titles: Vec<String> = Vec::new();
 
         for raw in raw_results {
             if let Some(ref candidates) = candidate_set {
@@ -1003,7 +1052,13 @@ impl ChatEngine {
                     .unwrap_or_default()
             };
 
-            if full_text.is_empty() {
+            // < 20 chars of extracted text is effectively unreadable —
+            // catches both truly-empty extraction and scanned PDFs that
+            // leave behind a stray watermark/page-number text layer.
+            if full_text.trim().len() < 20 {
+                if !unreadable_titles.contains(&doc_title) {
+                    unreadable_titles.push(doc_title.clone());
+                }
                 continue;
             }
 
@@ -1027,7 +1082,7 @@ impl ChatEngine {
 
         all_candidates.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
         all_candidates.truncate(15);
-        Ok(all_candidates)
+        Ok((all_candidates, unreadable_titles))
     }
 
     /// Persist the assistant's `ChatMessage` (with optional citations) to the
@@ -1195,6 +1250,33 @@ mod tests {
         let prompt = build_rag_prompt(RAG_SYSTEM_PROMPT, &docs, "What happened?");
         let expected = "Documents in your library:\n[1] Doc A title: chunk text 1\n[2] Doc B title: chunk text 2\n\nQuestion: What happened?";
         assert_eq!(prompt, expected);
+    }
+
+    // ── append_unreadable_note: real bug fix (scanned docs silently dropped) ──
+
+    #[test]
+    fn test_append_unreadable_note_empty_list_returns_unchanged() {
+        let base = "Documents in your library:\n[1] A: text\n\nQuestion: q";
+        assert_eq!(append_unreadable_note(base, &[]), base);
+    }
+
+    #[test]
+    fn test_append_unreadable_note_lists_titles() {
+        let base = "Documents in your library:\n[1] A: text\n\nQuestion: q";
+        let note = append_unreadable_note(base, &["Passport.pdf".to_string()]);
+        assert!(note.starts_with(base));
+        assert!(note.contains("Passport.pdf"));
+        assert!(note.contains("scanned images"));
+    }
+
+    #[test]
+    fn test_append_unreadable_note_multiple_titles_joined() {
+        let base = "base";
+        let note = append_unreadable_note(
+            base,
+            &["Passport.pdf".to_string(), "Visa.pdf".to_string()],
+        );
+        assert!(note.contains("Passport.pdf, Visa.pdf"));
     }
 
     // ── Test 6: below-floor canned answer ──
