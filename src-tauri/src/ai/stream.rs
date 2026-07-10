@@ -73,7 +73,7 @@ pub async fn ai_request_stream(
             .model_override
             .as_deref()
             .filter(|m| !m.is_empty())
-            .unwrap_or_else(|| cred.model.as_deref().unwrap_or("gpt-4o"))
+            .unwrap_or_else(|| cred.model.as_deref().unwrap_or("gpt-5.6-terra"))
             .to_string();
         let max_tokens = request.max_tokens.unwrap_or(4096);
         return Ok(codex_chat_stream(

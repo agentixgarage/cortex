@@ -842,7 +842,7 @@ export function useStartOpenAiOAuth() {
             authenticated: true,
             method: "oauth",
             displayName: "ChatGPT (Codex)",
-            model: "gpt-4o",
+            model: "gpt-5.6-terra",
             isActive: false,
           },
       ),

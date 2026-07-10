@@ -46,21 +46,23 @@ const ANTHROPIC_MODELS = [
   { label: "Claude Opus 4.7 (powerful)", value: "claude-opus-4" },
 ] as const;
 
+// Current as of July 2026 — confirmed via learn.chatgpt.com/docs/models.
+// OpenAI deprecates model slugs frequently (gpt-5, gpt-4o, gpt-4o-mini,
+// gpt-4.1, o1 family have ALL been retired/rejected already) — this list
+// WILL go stale again. A dynamic model-list fetch is the real fix
+// (ROADMAP.md) rather than another hardcoded guess.
 const OPENAI_MODELS = [
-  { label: "GPT-4o mini (fast)", value: "gpt-4o-mini" },
-  { label: "GPT-4o (balanced)", value: "gpt-4o" },
-  { label: "GPT-4.1 mini (fast)", value: "gpt-4.1-mini" },
-  { label: "GPT-4.1 (balanced)", value: "gpt-4.1" },
-  { label: "o1-mini (reasoning)", value: "o1-mini" },
-  { label: "o1 (reasoning, powerful)", value: "o1" },
+  { label: "GPT-5.6 Luna (fast)", value: "gpt-5.6-luna" },
+  { label: "GPT-5.6 Terra (balanced)", value: "gpt-5.6-terra" },
+  { label: "GPT-5.6 Sol (powerful)", value: "gpt-5.6-sol" },
+  { label: "GPT-5.5 (previous-gen)", value: "gpt-5.5" },
+  { label: "GPT-5.4 mini (fast, legacy)", value: "gpt-5.4-mini" },
+  { label: "GPT-5.4 (legacy)", value: "gpt-5.4" },
 ] as const;
 
-// ChatGPT/Codex OAuth subscriptions route through a restricted backend
-// (chatgpt.com/backend-api/codex, distinct from api.openai.com) — "o1"
-// (full) has not been confirmed available there, so it's excluded to avoid
-// another "model not supported" error. openai-codex users get everything
-// except the full "o1" tier.
-const OPENAI_CODEX_MODELS = OPENAI_MODELS.filter((m) => m.value !== "o1");
+// Confirmed supported via ChatGPT sign-in (learn.chatgpt.com/docs/models):
+// the full gpt-5.6 + gpt-5.5/5.4 family. Same list as direct API-key for now.
+const OPENAI_CODEX_MODELS = OPENAI_MODELS;
 
 const GEMINI_MODELS = [
   { label: "Gemini 2.5 Flash (fast)", value: "gemini-2.5-flash" },
@@ -68,7 +70,7 @@ const GEMINI_MODELS = [
 ] as const;
 
 const ANTHROPIC_DEFAULT_MODEL = "claude-haiku-4-5-20251001";
-const OPENAI_DEFAULT_MODEL = "gpt-4o-mini";
+const OPENAI_DEFAULT_MODEL = "gpt-5.6-terra";
 const GEMINI_DEFAULT_MODEL = "gemini-2.5-flash";
 const OLLAMA_DEFAULT_URL = "http://localhost:11434";
 

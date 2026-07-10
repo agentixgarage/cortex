@@ -379,9 +379,14 @@ impl Pass2LlmRefiner {
             // WR-07 fix: "openai" slug was missing a default, causing the skip-gate
             // to fire for any user who selected OpenAI but did not explicitly save
             // an extraction model. gpt-5 is not valid via the ChatGPT Codex OAuth
-            // backend (openai-codex); gpt-4o-mini is broadly available on both
-            // the direct API-key path and via ChatGPT subscriptions.
-            "openai" | "openai-codex" => "gpt-4o-mini",
+            // backend (openai-codex). gpt-5.6-terra is OpenAI's current
+            // (July 2026) balanced-tier model, confirmed supported via
+            // both the direct API-key path and ChatGPT subscriptions
+            // (learn.chatgpt.com/docs/models). NOTE: OpenAI deprecates
+            // model slugs frequently (gpt-5.2, gpt-5.3-codex already
+            // retired) — this WILL go stale again; a dynamic model-list
+            // fetch is the real fix (ROADMAP.md).
+            "openai" | "openai-codex" => "gpt-5.6-terra",
             "gemini" => "gemini-2.5-flash",
             _ => "", // Ollama + unknown providers: no default
         }
@@ -757,7 +762,7 @@ mod tests {
 
     #[test]
     fn test_pick_model_default_openai_codex() {
-        assert_eq!(Pass2LlmRefiner::pick_model_default("openai-codex"), "gpt-4o-mini");
+        assert_eq!(Pass2LlmRefiner::pick_model_default("openai-codex"), "gpt-5.6-terra");
     }
 
     #[test]

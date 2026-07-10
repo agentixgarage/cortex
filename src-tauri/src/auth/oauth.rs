@@ -88,11 +88,13 @@ pub async fn start_openai_codex_oauth(
         tokens.refresh_token.as_deref(),
         expires_at,
         Some("ChatGPT (Codex)"),
-        // gpt-5 is NOT valid via the ChatGPT Codex Responses API (Codex-only
-        // endpoint on api.openai.com, distinct from the ChatGPT subscription
-        // backend) — gpt-4o is broadly available; user can change via the
-        // model dropdown after connect.
-        Some("gpt-4o"),
+        // gpt-5.6-terra: OpenAI's current (July 2026) balanced-tier model,
+        // confirmed supported via ChatGPT sign-in (learn.chatgpt.com/docs/models).
+        // Model slugs deprecate frequently (gpt-5, then gpt-4o-mini both
+        // failed here before this) — user can change via the model
+        // dropdown after connect; a dynamic model-list fetch is the real
+        // long-term fix (ROADMAP.md).
+        Some("gpt-5.6-terra"),
     )?;
 
     Ok("openai-codex".to_string())

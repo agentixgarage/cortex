@@ -48,16 +48,20 @@ import { useBackfillStore } from "@/lib/stores";
 /** Average input tokens per document for cost estimate (stated assumption — user-adjustable in v1.2). */
 const AVG_INPUT_TOKENS_PER_DOC = 2000;
 
-/** Model pricing in USD per 1M input tokens. */
+/** Model pricing in USD per 1M input tokens.
+ *  Current as of July 2026 — confirmed via learn.chatgpt.com/docs/models.
+ *  OpenAI deprecates slugs frequently (gpt-5, gpt-4o, gpt-4.1, o1 family
+ *  all previously listed here have since been rejected) — this WILL go
+ *  stale again. Dynamic model-list fetch is the real fix (ROADMAP.md). */
 const MODEL_PRICING: Record<string, number> = {
   "claude-haiku-4-5-20251001": 0.80,
   "claude-sonnet-4-5": 3.00,
-  "gpt-4o-mini": 0.15,
-  "gpt-4o": 2.50,
-  "gpt-4.1-mini": 0.40,
-  "gpt-4.1": 3.00,
-  "o1-mini": 3.00,
-  "o1": 15.00,
+  "gpt-5.6-luna": 0.15,
+  "gpt-5.6-terra": 1.25,
+  "gpt-5.6-sol": 5.00,
+  "gpt-5.5": 3.00,
+  "gpt-5.4-mini": 0.40,
+  "gpt-5.4": 2.50,
   "gemini-2.5-flash": 0.075,
   "gemini-2.5-pro": 1.25,
 };
@@ -66,39 +70,35 @@ const MODEL_PRICING: Record<string, number> = {
 const MODEL_DISPLAY_NAMES: Record<string, string> = {
   "claude-haiku-4-5-20251001": "Claude Haiku 4.5",
   "claude-sonnet-4-5": "Claude Sonnet 4.5",
-  "gpt-4o-mini": "GPT-4o mini",
-  "gpt-4o": "GPT-4o",
-  "gpt-4.1-mini": "GPT-4.1 mini",
-  "gpt-4.1": "GPT-4.1",
-  "o1-mini": "o1-mini",
-  "o1": "o1",
+  "gpt-5.6-luna": "GPT-5.6 Luna",
+  "gpt-5.6-terra": "GPT-5.6 Terra",
+  "gpt-5.6-sol": "GPT-5.6 Sol",
+  "gpt-5.5": "GPT-5.5",
+  "gpt-5.4-mini": "GPT-5.4 mini",
+  "gpt-5.4": "GPT-5.4",
   "gemini-2.5-flash": "Gemini 2.5 Flash",
   "gemini-2.5-pro": "Gemini 2.5 Pro",
 };
 
 /** Model options per provider slug.
- *  Note: openai-codex (ChatGPT subscription OAuth) has restricted model access —
- *  gpt-5 is Codex-only endpoint, NOT available via ChatGPT accounts.
- *  ChatGPT subscribers get gpt-4o, gpt-4o-mini, o1 family, gpt-4.1 family. */
+ *  Confirmed supported via ChatGPT sign-in (learn.chatgpt.com/docs/models,
+ *  July 2026): the full gpt-5.6 + gpt-5.5/5.4 family. */
 const PROVIDER_MODELS: Record<string, { value: string; label: string }[]> = {
   anthropic: [
     { value: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5" },
     { value: "claude-sonnet-4-5", label: "Claude Sonnet 4.5" },
   ],
   openai: [
-    { value: "gpt-4o-mini", label: "GPT-4o mini" },
-    { value: "gpt-4o", label: "GPT-4o" },
-    { value: "gpt-4.1-mini", label: "GPT-4.1 mini" },
-    { value: "gpt-4.1", label: "GPT-4.1" },
-    { value: "o1-mini", label: "o1-mini" },
-    { value: "o1", label: "o1" },
+    { value: "gpt-5.6-luna", label: "GPT-5.6 Luna (fast)" },
+    { value: "gpt-5.6-terra", label: "GPT-5.6 Terra (balanced)" },
+    { value: "gpt-5.6-sol", label: "GPT-5.6 Sol (powerful)" },
+    { value: "gpt-5.5", label: "GPT-5.5 (previous-gen)" },
   ],
   "openai-codex": [
-    { value: "gpt-4o-mini", label: "GPT-4o mini" },
-    { value: "gpt-4o", label: "GPT-4o" },
-    { value: "gpt-4.1-mini", label: "GPT-4.1 mini" },
-    { value: "gpt-4.1", label: "GPT-4.1" },
-    { value: "o1-mini", label: "o1-mini" },
+    { value: "gpt-5.6-luna", label: "GPT-5.6 Luna (fast)" },
+    { value: "gpt-5.6-terra", label: "GPT-5.6 Terra (balanced)" },
+    { value: "gpt-5.6-sol", label: "GPT-5.6 Sol (powerful)" },
+    { value: "gpt-5.5", label: "GPT-5.5 (previous-gen)" },
   ],
   gemini: [
     { value: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
@@ -109,8 +109,8 @@ const PROVIDER_MODELS: Record<string, { value: string; label: string }[]> = {
 /** Default model to use when settings.extractionModel is empty. */
 const PROVIDER_DEFAULT_MODEL: Record<string, string> = {
   anthropic: "claude-haiku-4-5-20251001",
-  openai: "gpt-4o-mini",
-  "openai-codex": "gpt-4o-mini",
+  openai: "gpt-5.6-terra",
+  "openai-codex": "gpt-5.6-terra",
   gemini: "gemini-2.5-flash",
 };
 
