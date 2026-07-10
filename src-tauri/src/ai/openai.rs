@@ -55,6 +55,12 @@ pub fn build_codex_request(
         "input": input,
         "max_output_tokens": max_tokens,
         "stream": false,
+        // The Responses API defaults `store` to true (persists the response
+        // server-side for 30 days, retrievable via response_id — a
+        // Platform/API-key-tier feature). ChatGPT-subscription auth cannot
+        // use that storage tier and rejects requests that omit this:
+        // {"detail":"Store must be set to false"}.
+        "store": false,
     });
 
     (url, headers, body)
@@ -386,6 +392,25 @@ mod tests {
         assert!(body.get("stream").is_some(), "Codex body must have 'stream' field");
         assert_eq!(body["stream"], false, "stream must be false for non-streaming");
         assert_eq!(body["max_output_tokens"], 100, "max_output_tokens must be set");
+    }
+
+    #[test]
+    fn test_build_codex_request_sets_store_false() {
+        // Real bug: omitting `store` defaults to true on the Responses API
+        // (persists server-side, a Platform/API-key-tier feature). ChatGPT
+        // subscription auth rejects that with {"detail":"Store must be set
+        // to false"}.
+        let msgs = sample_messages();
+        let (_, _, body) = build_codex_request("tok", "gpt-5.6-terra", 100, "sys", &msgs);
+        assert_eq!(body["store"], false, "store must be explicitly false for ChatGPT-auth requests");
+    }
+
+    #[test]
+    fn test_build_codex_stream_request_also_sets_store_false() {
+        let msgs = sample_messages();
+        let (_, _, body) = build_codex_stream_request("tok", "gpt-5.6-terra", 100, "sys", &msgs);
+        assert_eq!(body["store"], false);
+        assert_eq!(body["stream"], true);
     }
 
     #[test]
