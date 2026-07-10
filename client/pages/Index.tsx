@@ -8,6 +8,7 @@ import {
   FolderPlus,
 } from "lucide-react";
 import { useStats, useSpaces, useActivityFeed, useRecentDocuments } from "@/hooks/useTauri";
+import { DailyQuizWidget } from "@/components/quiz/DailyQuizWidget";
 import { formatBytes, safeDistance } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -86,6 +87,9 @@ export default function Dashboard() {
           <span>Search your documents... (Cmd+K)</span>
         </button>
       </div>
+
+      {/* Daily quiz (v1.2 #3) — renders nothing when no candidates exist */}
+      <DailyQuizWidget />
 
       {/* Stats Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">

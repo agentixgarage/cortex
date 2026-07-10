@@ -718,3 +718,27 @@ export interface UserProfile {
   countries: string[];
   currencies: string[];
 }
+
+// -------------------------------------------------------------------------
+// v1.2 #3: Daily quiz (occasional confirm/deny feedback loop)
+// Mirrors Rust `QuizQuestion` / `QuizAnswer` in types.rs.
+// -------------------------------------------------------------------------
+
+export interface QuizQuestion {
+  id: string;
+  kind: string;
+  entityType: string;
+  entityIdA: string;
+  nameA: string;
+  entityIdB: string;
+  nameB: string;
+  similarity: number;
+}
+
+export interface QuizAnswer {
+  questionId: string;
+  kind: string;
+  entityIdA: string;
+  entityIdB: string;
+  confirmed: boolean;
+}

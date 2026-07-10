@@ -14,6 +14,7 @@ pub mod graph;
 pub mod intelligence;
 pub mod chat;
 pub mod profile;
+pub mod quiz;
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -211,6 +212,11 @@ pub fn run() {
                 crate::profile::store::load(&app_data),
             ));
 
+            // v1.2 #3: Daily quiz feedback log
+            let quiz_feedback = Arc::new(Mutex::new(
+                crate::quiz::store::QuizFeedbackStore::load(&app_data),
+            ));
+
             // Phase 10 (Plan 06): Initialize hyperbolic HNSW secondary index fields.
             // Both start empty — None for the index (D-11 fallback active until first recluster),
             // and an empty Vec for the id map. Populated by rebuild_hyp_index() after recluster.
@@ -243,6 +249,7 @@ pub fn run() {
                 ontology_store,
                 auth_state: auth_arc,
                 user_profile,
+                quiz_feedback,
             });
 
             Ok(())
@@ -340,6 +347,9 @@ pub fn run() {
             // v1.2 #2 — User profile (onboarding "About You")
             commands::profile::get_user_profile,
             commands::profile::save_user_profile,
+            // v1.2 #3 — Daily quiz feedback loop
+            commands::quiz::get_daily_quiz,
+            commands::quiz::submit_quiz_answer,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

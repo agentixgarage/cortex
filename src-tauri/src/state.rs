@@ -112,4 +112,9 @@ pub struct AppState {
     /// app_data_dir/user_profile.json. Consumed by ChatEngine to seed the
     /// RAG system prompt with context documents alone cannot supply.
     pub user_profile: Arc<Mutex<UserProfile>>,
+    /// v1.2 #3: Daily quiz feedback log (alias-confirm answers), persisted
+    /// to app_data_dir/quiz_feedback.json. Used both to record the "how
+    /// well are we doing" measurement and to avoid re-asking the same
+    /// question across daily-card refreshes.
+    pub quiz_feedback: Arc<Mutex<crate::quiz::store::QuizFeedbackStore>>,
 }

@@ -69,6 +69,9 @@ import type {
   ProminentEntity,
   // v1.2 #2: User profile (onboarding "About You")
   UserProfile,
+  // v1.2 #3: Daily quiz
+  QuizQuestion,
+  QuizAnswer,
 } from "../lib/types";
 
 // --- Query Keys ---------------------------------------------------------------
@@ -124,6 +127,8 @@ export const queryKeys = {
   prominentEntities: ["entities", "prominent"] as const,
   // --- v1.2 #2: User profile ---
   userProfile: ["user-profile"] as const,
+  // --- v1.2 #3: Daily quiz ---
+  dailyQuiz: (limit: number) => ["daily-quiz", limit] as const,
 };
 
 // --- Space Hooks --------------------------------------------------------------
@@ -1287,6 +1292,27 @@ export function useSaveUserProfile() {
       tauriInvoke<null>("save_user_profile", { profile }, () => null),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.userProfile });
+    },
+  });
+}
+
+// --- v1.2 #3: Daily quiz (occasional confirm/deny feedback loop) --------
+
+export function useDailyQuiz(limit: number = 1) {
+  return useQuery({
+    queryKey: queryKeys.dailyQuiz(limit),
+    queryFn: () =>
+      tauriInvoke<QuizQuestion[]>("get_daily_quiz", { limit }, () => []),
+  });
+}
+
+export function useSubmitQuizAnswer() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (answer: QuizAnswer) =>
+      tauriInvoke<null>("submit_quiz_answer", { answer }, () => null),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["daily-quiz"] });
     },
   });
 }

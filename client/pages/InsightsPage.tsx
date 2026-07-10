@@ -31,6 +31,8 @@ import {
   useActivityFeed,
 } from "@/hooks/useTauri";
 import type { SpaceGraph } from "@/lib/types";
+import { QuizBatchPanel } from "@/components/quiz/QuizBatchPanel";
+import { HelpCircle } from "lucide-react";
 
 // --- File type color map ---------------------------------------------------
 
@@ -285,6 +287,15 @@ export default function InsightsPage() {
         <p className="text-text-secondary">
           Analytics and overview of your document corpus.
         </p>
+      </div>
+
+      {/* Take more quizzes (v1.2 #3) — batch entity-alias confirmation */}
+      <div id="quizzes" className="card p-6 space-y-4">
+        <div className="flex items-center gap-2">
+          <HelpCircle size={18} className="text-accent-primary" />
+          <h2 className="section-header text-text-primary">Take more quizzes</h2>
+        </div>
+        <QuizBatchPanel />
       </div>
 
       {/* Stat Cards Row */}

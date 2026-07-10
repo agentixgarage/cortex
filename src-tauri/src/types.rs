@@ -1125,6 +1125,60 @@ pub struct UserProfile {
     pub currencies: Vec<String>,
 }
 
+// -------------------------------------------------------------------------
+// v1.2 #3: Daily quiz (occasional confirm/deny feedback loop)
+// One card/day on Dashboard, plus a "Take more quizzes" tab under Insights.
+// v1 question kind: alias_confirm — is entity A the same as entity B?
+// Answers are logged as a feedback signal (quiz_feedback.json); acting on
+// "yes" answers (actually merging the two canonicals) is a fast-follow —
+// see src-tauri/src/quiz/mod.rs module doc for the explicit scope note.
+// -------------------------------------------------------------------------
+
+/// A single quiz question presented to the user.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct QuizQuestion {
+    pub id: String,
+    /// Question kind — "alias_confirm" is the only kind in v1. String (not
+    /// enum) so future kinds don't require a frontend rebuild lockstep.
+    pub kind: String,
+    pub entity_type: String,
+    pub entity_id_a: String,
+    pub name_a: String,
+    pub entity_id_b: String,
+    pub name_b: String,
+    /// 0.0-1.0 token-overlap similarity that produced this candidate —
+    /// surfaced for debugging/tuning, not shown to the user.
+    pub similarity: f32,
+}
+
+/// User's answer to a `QuizQuestion`, submitted via `submit_quiz_answer`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct QuizAnswer {
+    pub question_id: String,
+    pub kind: String,
+    pub entity_id_a: String,
+    pub entity_id_b: String,
+    /// true = "Yes, same" / false = "No, different" / omitted entirely by
+    /// the frontend for "Skip" (skip never calls submit_quiz_answer).
+    pub confirmed: bool,
+}
+
+/// One logged feedback entry — persisted verbatim plus a server-stamped
+/// `answeredAt` for the "how well are we doing" measurement the daily quiz
+/// exists to produce.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct QuizFeedbackEntry {
+    pub question_id: String,
+    pub kind: String,
+    pub entity_id_a: String,
+    pub entity_id_b: String,
+    pub confirmed: bool,
+    pub answered_at: String,
+}
+
 /// Provider slug for the local ruvllm (Metal-accelerated on-device) inference backend (D-03).
 ///
 /// NOTE: This constant was originally scoped to Plan 11.8-04, which had not yet executed
