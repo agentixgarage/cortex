@@ -40,7 +40,7 @@ const COSINE_FLOOR: f32 = 0.20;
 
 /// The exact system prompt text from D-06 (11.7-CONTEXT.md). Preserve line
 /// breaks verbatim — this is sent as-is to every provider.
-pub const RAG_SYSTEM_PROMPT: &str = "You are a helpful assistant answering questions about the user's personal documents.\n\nRules:\n- Answer using the numbered document excerpts below. Cite as [1], [2] matching the excerpts.\n- Reasonable inference IS allowed: use context clues (document titles, shared surnames, matching addresses, matching dates of birth, explicit relation words) to draw conclusions the document implies. When you infer rather than quote, say so briefly (\"appears to be...\", \"based on shared surname...\").\n- Extract concrete data (numbers, dates, addresses, amounts, names) directly from the excerpts. Read carefully — sale deeds contain sale prices, tax receipts contain amounts, IDs contain DOBs.\n- If a question spans multiple docs, synthesize across them.\n- Only refuse when the info is genuinely absent from all excerpts. Don't refuse just because it isn't stated in exactly the words the user used.\n- Never cite a source not in the list.";
+pub const RAG_SYSTEM_PROMPT: &str = "You are a helpful assistant answering questions about the user's personal documents. Be precise, concrete, and grounded.\n\nGeneral rules:\n- Answer using the numbered document excerpts below. Cite as [1], [2] matching the excerpts.\n- Reasonable inference IS allowed: use context clues (document titles, shared surnames, matching addresses, matching dates of birth, explicit relation words) to draw conclusions the document implies. When you infer rather than quote, say so briefly (\"appears to be…\", \"based on shared surname…\").\n- Extract concrete data (numbers, dates, addresses, amounts, names) directly from the excerpts. Read carefully — receipts, deeds, IDs, invoices, statements each contain distinct fields.\n- Never cite a source not in the list. Never invent numbers, dates, IDs, or names.\n- If the info is genuinely absent from all excerpts, say so explicitly. Do not pad the answer with unrelated content just because a document was retrieved.\n\nQuery-type handling:\n- Aggregate queries (\"how much total\", \"how many\", \"list all\"): iterate every relevant excerpt, sum/enumerate, then report per-doc breakdown + total. Preserve the exact currency symbol as it appears in the source (₹, $, £, €, ¥, etc.). Do not convert currencies or drop the symbol. If the amounts span multiple currencies, report each subtotal separately — never sum across currencies without saying so.\n- Year-specific queries (\"in 2020\", \"last year\", \"FY 2023-24\"): only include excerpts whose date/filename/content matches the asked year. Ignore other years even if they were retrieved.\n- Entity-scoped queries (\"for X vs Y\", \"in city Z\", \"for asset X\", \"about person Y\"): only include excerpts explicitly tied to the named entity. If an excerpt could be about either or neither, say so. Entities can be people, organizations, properties, vehicles, projects, accounts, or anything else that appears in the corpus.\n- Multi-jurisdiction queries: users may hold assets, documents, or transactions across multiple countries. Never assume a single jurisdiction. Preserve country-specific fields as-is (US SSN, India Aadhaar/PAN, UK NI, EU IBAN, etc.) and country-specific formats (currency symbols, date formats).\n- Follow-up queries (\"of that\", \"how much of that for X\", \"what about last year\"): treat the prior turn as context. If the current query is a filter on the previous answer's scope, apply that filter.\n- Comparison queries (\"which cost more\"): pull the compared numbers, state them, then answer.\n\nGrounding discipline:\n- If asked about a specific year and no retrieved excerpt is from that year, say \"I don't have documents for {year} in the retrieved excerpts\" rather than guessing.\n- If asked about an entity not present in any excerpt, say \"I don't have documents about {entity}\".\n- Never confuse document types: an income-tax return is not a property-tax receipt; an insurance policy is not an invoice.";
 
 /// Canned answer returned when no chunk clears the cosine floor (D-03).
 const NO_MATCH_ANSWER: &str = "I couldn't find anything relevant in your library.";
@@ -181,8 +181,28 @@ impl ChatEngine {
         query: String,
         filters: Option<SearchFilters>,
     ) -> Result<(), String> {
+        // ── Load recent conversation history for context-aware retrieval + LLM ──
+        // Last N turns keeps follow-ups grounded ("but you cited property tax…")
+        // without blowing up prompt size.
+        let history: Vec<ChatMessage> = {
+            let store = chat_store.lock().await;
+            store
+                .get(&session_id)
+                .map(|s| {
+                    let msgs = &s.messages;
+                    let take = msgs.len().saturating_sub(1).min(6); // exclude current user turn just appended
+                    msgs.iter().rev().skip(1).take(take).cloned().collect::<Vec<_>>()
+                        .into_iter().rev().collect()
+                })
+                .unwrap_or_default()
+        };
+
+        // Augmented retrieval query = last user turns + current query.
+        // Follow-ups like "how much of that for X?" gain the missing subject.
+        let augmented_query = Self::build_retrieval_query(&history, &query);
+
         // ── Retrieval (spawn_blocking: std::sync::Mutex guards must not cross .await) ──
-        let retrieval_query = query.clone();
+        let retrieval_query = augmented_query.clone();
         let retrieval = tokio::task::spawn_blocking(move || {
             Self::retrieve_and_rerank(
                 &retrieval_query,
@@ -236,19 +256,32 @@ impl ChatEngine {
             return Ok(());
         }
 
+        // Dedup: cap at 3 chunks per doc — one doc-spam bug pattern is a
+        // single 5MB PDF winning all 5 top slots and drowning other candidates.
+        let mut per_doc_count: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        let retrieval_dedup: Vec<_> = retrieval
+            .iter()
+            .filter(|(doc_id, _, _, _)| {
+                let c = per_doc_count.entry(doc_id.clone()).or_insert(0);
+                if *c >= 3 { return false; }
+                *c += 1;
+                true
+            })
+            .collect();
+
         // ── Build citations + numbered docs for the prompt ──
         let mut citations: Vec<Citation> = Vec::new();
         let mut numbered_docs: Vec<(u32, String, String)> = Vec::new();
-        for (index, (doc_id, doc_title, chunk, _score)) in retrieval.iter().enumerate() {
+        for (index, (doc_id, doc_title, chunk, _score)) in retrieval_dedup.iter().enumerate() {
             let doc_index = (index + 1) as u32;
             citations.push(Citation {
                 index: doc_index,
-                doc_id: doc_id.clone(),
-                doc_title: doc_title.clone(),
+                doc_id: doc_id.to_string(),
+                doc_title: doc_title.to_string(),
                 chunk_start: chunk.start,
                 chunk_end: chunk.end,
             });
-            numbered_docs.push((doc_index, doc_title.clone(), chunk.text.clone()));
+            numbered_docs.push((doc_index, doc_title.to_string(), chunk.text.clone()));
         }
 
         let numbered_docs_refs: Vec<(u32, &str, &str)> = numbered_docs
@@ -258,12 +291,28 @@ impl ChatEngine {
 
         let prompt = build_rag_prompt(RAG_SYSTEM_PROMPT, &numbered_docs_refs, &query);
 
+        // Build message list with recent history so LLM sees the conversation
+        // arc, not just the current query in isolation. History is user↔assistant
+        // pairs from earlier turns; assistants' prior citation lists are dropped
+        // to save tokens — the doc excerpts for THIS turn are already numbered.
+        let mut messages: Vec<crate::ai::ServiceMessage> = history
+            .iter()
+            .map(|m| crate::ai::ServiceMessage {
+                role: match m.role {
+                    ChatRole::User => "user".to_string(),
+                    ChatRole::Assistant => "assistant".to_string(),
+                },
+                content: m.content.clone(),
+            })
+            .collect();
+        messages.push(crate::ai::ServiceMessage {
+            role: "user".to_string(),
+            content: prompt,
+        });
+
         let request = crate::ai::AIServiceRequest {
             system_prompt: RAG_SYSTEM_PROMPT.to_string(),
-            messages: vec![crate::ai::ServiceMessage {
-                role: "user".to_string(),
-                content: prompt,
-            }],
+            messages,
             max_tokens: Some(4096),
             temperature: None,
             response_format: None,
@@ -390,8 +439,91 @@ impl ChatEngine {
         Ok(())
     }
 
-    /// Blocking retrieval segment: embed query, HNSW top-8, chunk + embed +
-    /// score, rerank to top-12. Runs inside `spawn_blocking` so the
+    /// Build an augmented query for retrieval that carries recent-turn context.
+    /// Follow-ups like "how much of that for X?" gain the subject from prior
+    /// turns; otherwise "of that for X" alone embeds to the wrong docs.
+    ///
+    /// Strategy: concatenate the last 2 user turns + last assistant answer +
+    /// current query, all trimmed. Cheap, deterministic, no LLM call.
+    fn build_retrieval_query(history: &[ChatMessage], current: &str) -> String {
+        let mut parts: Vec<String> = Vec::new();
+
+        // Take last 2 user turns + last assistant answer for context.
+        let user_turns: Vec<&ChatMessage> = history
+            .iter()
+            .filter(|m| m.role == ChatRole::User)
+            .collect();
+        let start = user_turns.len().saturating_sub(2);
+        for m in &user_turns[start..] {
+            parts.push(m.content.trim().to_string());
+        }
+
+        if let Some(last_a) = history.iter().rev().find(|m| m.role == ChatRole::Assistant) {
+            // Keep only first 400 chars of last assistant answer to avoid
+            // drowning the query embedding.
+            let a: String = last_a.content.chars().take(400).collect();
+            parts.push(a);
+        }
+
+        parts.push(current.trim().to_string());
+
+        parts.join(" ")
+    }
+
+    /// Find known canonical entities whose name (or an alias) appears in the
+    /// query. Case-insensitive substring match. Returns entity IDs. Used for
+    /// pre-filtering docs to those mentioning the same entity — massively
+    /// improves accuracy on "for X vs Y" or "of that, how much for X" queries.
+    fn entities_mentioned_in_query(
+        query: &str,
+        entity_store: &Arc<std::sync::Mutex<EntityStore>>,
+    ) -> Vec<String> {
+        let store = match entity_store.lock() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+        let q_lower = query.to_lowercase();
+        let mut ids: Vec<String> = Vec::new();
+        for (id, ent) in store.canonicals.iter() {
+            let name_lower = ent.canonical_name.to_lowercase();
+            let hit_name = name_lower.len() >= 3 && q_lower.contains(&name_lower);
+            let hit_alias = ent.aliases.iter().any(|a| {
+                let al = a.to_lowercase();
+                al.len() >= 3 && q_lower.contains(&al)
+            });
+            if hit_name || hit_alias {
+                ids.push(id.clone());
+            }
+        }
+        ids
+    }
+
+    /// Extract 4-digit years (19xx / 20xx) from a query string. Used to
+    /// pre-filter documents by year when the user asks about a specific year.
+    fn extract_years(query: &str) -> Vec<String> {
+        let mut years: Vec<String> = Vec::new();
+        let re = regex::Regex::new(r"\b(19|20)\d{2}\b").expect("year regex");
+        for m in re.find_iter(query) {
+            let y = m.as_str().to_string();
+            if !years.contains(&y) {
+                years.push(y);
+            }
+        }
+        // FY 2024-25 style: capture the "-25" tail as a two-digit hint too
+        let fy = regex::Regex::new(r"\b(?:FY|fy)\s*(\d{4})[-–—](\d{2,4})\b").expect("fy regex");
+        for cap in fy.captures_iter(query) {
+            if let Some(start_year) = cap.get(1) {
+                let y = start_year.as_str().to_string();
+                if !years.contains(&y) {
+                    years.push(y);
+                }
+            }
+        }
+        years
+    }
+
+    /// Blocking retrieval segment: embed query, HNSW top-K, chunk + embed +
+    /// score, rerank to top-N. Runs inside `spawn_blocking` so the
     /// std::sync::Mutex guards on `engine`/`entity_store` never cross an
     /// `.await`.
     #[allow(clippy::type_complexity)]
@@ -432,14 +564,46 @@ impl ChatEngine {
             };
         }
 
+        // Query-mention entity narrowing: if the query text names a known
+        // canonical entity (or alias), narrow candidates to docs mentioning
+        // that entity. Only applied when the mention-set is small (<=3
+        // entities) — larger mention sets usually mean the query is broad.
+        let mention_ids = Self::entities_mentioned_in_query(query, entity_store);
+        if !mention_ids.is_empty() && mention_ids.len() <= 3 {
+            let entity_guard = entity_store
+                .lock()
+                .map_err(|e| format!("entity_store lock poisoned: {}", e))?;
+            let mut mention_docs: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for id in &mention_ids {
+                if let Some(docs) = entity_guard.doc_index.get(id) {
+                    for d in docs { mention_docs.insert(d.clone()); }
+                }
+            }
+            if !mention_docs.is_empty() {
+                candidate_set = Some(match candidate_set {
+                    None => mention_docs,
+                    Some(existing) => existing.intersection(&mention_docs).cloned().collect(),
+                });
+            }
+        }
+
         let collection_arc = engine_guard
             .collections
             .get_collection("documents_384")
             .ok_or_else(|| "documents_384 collection not found".to_string())?;
 
+        // Extract years from the query. If any present, we bias retrieval:
+        //   - HNSW k is enlarged so pre-filtered set is deep enough.
+        //   - Docs whose path/excerpt mentions the year get a score boost.
+        //   - Docs with a strong year-mismatch (a different explicit year in
+        //     filename) are filtered out entirely when candidate_set is unset.
+        let query_years = Self::extract_years(query);
+
+        let k_hnsw = if query_years.is_empty() { 12 } else { 30 };
+
         let search_query = ruvector_core::types::SearchQuery {
             vector: query_vec.clone(),
-            k: 12,
+            k: k_hnsw,
             filter: None,
             ef_search: None,
         };
@@ -448,6 +612,9 @@ impl ChatEngine {
             let collection = collection_arc.read();
             collection.db.search(search_query).map_err(|e| e.to_string())?
         };
+
+        // Regex used to detect a year token in each doc's path/excerpt.
+        let doc_year_re = regex::Regex::new(r"\b(19|20)\d{2}\b").expect("doc year re");
 
         let mut all_candidates: Vec<(String, String, Chunk, f32)> = Vec::new();
 
@@ -469,30 +636,61 @@ impl ChatEngine {
                 .unwrap_or("Unknown")
                 .to_string();
 
-            // Read FULL document text from disk (Fix: 200-char excerpts starve LLM).
-            // Falls back to metadata.excerpt if disk parse fails.
-            let full_text: String = metadata
+            let doc_path = metadata
                 .get("path")
                 .and_then(|v| v.as_str())
-                .and_then(|p| {
-                    crate::pipeline::parser::parse_document(std::path::Path::new(p))
-                        .ok()
-                        .map(|pd| pd.text)
-                })
-                .or_else(|| {
-                    metadata
-                        .get("excerpt")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                })
-                .unwrap_or_default();
+                .unwrap_or("")
+                .to_string();
+
+            // Year-aware bias (generic — works for any query with a year token):
+            //   * boost = +0.15 if title/path contains a query year
+            //   * hard filter: drop the doc if title mentions a DIFFERENT explicit
+            //     year and no query year, AND no other candidate matches; this is
+            //     handled implicitly by the post-loop rerank.
+            let mut year_boost: f32 = 0.0;
+            if !query_years.is_empty() {
+                let hay = format!("{} {}", doc_title, doc_path);
+                let doc_years: Vec<String> = doc_year_re
+                    .find_iter(&hay)
+                    .map(|m| m.as_str().to_string())
+                    .collect();
+                let matches_query_year = query_years.iter().any(|qy| doc_years.contains(qy));
+                if matches_query_year {
+                    year_boost = 0.15;
+                } else if !doc_years.is_empty() {
+                    // Doc has a specific year AND no query-year match → skip.
+                    // Only skip when candidate_set is None (no user-supplied filters).
+                    if candidate_set.is_none() {
+                        continue;
+                    }
+                }
+            }
+
+            // Read FULL document text from disk (Fix: 200-char excerpts starve LLM).
+            // Falls back to metadata.excerpt if disk parse fails.
+            let full_text: String = if !doc_path.is_empty() {
+                crate::pipeline::parser::parse_document(std::path::Path::new(&doc_path))
+                    .ok()
+                    .map(|pd| pd.text)
+                    .or_else(|| {
+                        metadata
+                            .get("excerpt")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    })
+                    .unwrap_or_default()
+            } else {
+                metadata
+                    .get("excerpt")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_default()
+            };
 
             if full_text.is_empty() {
                 continue;
             }
 
-            // Chunk at 1500 chars / 200 overlap — big enough to carry
-            // dollar figures, dates, party names in a single window.
             let doc_chunks = chunk_text(&full_text, 1500, 200);
             let mut scored_chunks: Vec<(String, String, Chunk, f32)> = Vec::new();
 
@@ -501,7 +699,8 @@ impl ChatEngine {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
-                let score = cosine_sim(&query_vec, &chunk_vec);
+                let base = cosine_sim(&query_vec, &chunk_vec);
+                let score = (base + year_boost).clamp(-1.0, 1.0);
                 scored_chunks.push((raw.id.clone(), doc_title.clone(), chunk, score));
             }
 

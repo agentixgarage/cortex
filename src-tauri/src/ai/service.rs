@@ -196,7 +196,11 @@ pub async fn ai_request(
         let token = cred.oauth_token.as_deref().ok_or_else(|| {
             "No OAuth token stored for openai-codex. Go to Settings → Sign in with ChatGPT.".to_string()
         })?;
-        let model = cred.model.as_deref().unwrap_or("gpt-5");
+        // ChatGPT subscriptions route through the Codex Responses API; gpt-5 is
+        // NOT supported for this backend (Codex-only endpoint on api.openai.com).
+        // Valid models via ChatGPT OAuth: gpt-4o, gpt-4o-mini, o1, o1-mini,
+        // o1-preview, gpt-4.1, gpt-4.1-mini. Default to gpt-4o (widely available).
+        let model = cred.model.as_deref().unwrap_or("gpt-4o");
         let max_tokens = request.max_tokens.unwrap_or(4096);
         return dispatch_with_401_retry(
             || {
