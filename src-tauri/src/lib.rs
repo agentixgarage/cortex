@@ -302,6 +302,7 @@ pub fn run() {
             commands::ai::connect_provider,
             commands::ai::disconnect_provider,
             commands::ai::set_active_provider,
+            commands::ai::set_provider_model,
             commands::ai::get_active_provider,
             commands::ai::save_setup_token,
             commands::ai::test_connection,

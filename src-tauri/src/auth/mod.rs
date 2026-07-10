@@ -194,6 +194,23 @@ impl AuthState {
         self.persist()
     }
 
+    /// Update the `model` field on an already-stored credential in place —
+    /// no re-authentication needed. Fixes a real UX gap: previously the
+    /// only way to change a provider's model was full disconnect+reconnect,
+    /// and for OAuth providers (openai-codex) the reconnect flow itself has
+    /// no model picker at all, so the model was permanently stuck at
+    /// whatever default was set on first connect.
+    pub fn update_credential_model(&self, provider: &str, model: &str) -> Result<(), String> {
+        let mut store = self.store.lock().map_err(|e| e.to_string())?;
+        let cred = store
+            .credentials
+            .get_mut(provider)
+            .ok_or_else(|| format!("No credentials stored for provider: {}", provider))?;
+        cred.model = Some(model.to_string());
+        drop(store);
+        self.persist()
+    }
+
     pub fn remove_credential(&self, provider: &str) -> Result<(), String> {
         let mut store = self.store.lock().map_err(|e| e.to_string())?;
         store.credentials.remove(provider);
@@ -381,6 +398,62 @@ mod tests {
     fn test_set_active_provider_unknown_fails() {
         let (state, _dir) = temp_auth_state();
         let result = state.set_active_provider("nonexistent");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_update_credential_model_changes_in_place() {
+        let (state, _dir) = temp_auth_state();
+        state.store_api_key("openai", "sk-openai", Some("gpt-4o-mini")).unwrap();
+
+        state.update_credential_model("openai", "gpt-4.1").unwrap();
+
+        let cred = state.get_credential("openai").unwrap().unwrap();
+        assert_eq!(cred.model.as_deref(), Some("gpt-4.1"));
+    }
+
+    #[test]
+    fn test_update_credential_model_preserves_other_fields() {
+        let (state, _dir) = temp_auth_state();
+        state.store_api_key("openai", "sk-openai", Some("gpt-4o-mini")).unwrap();
+
+        state.update_credential_model("openai", "gpt-4.1").unwrap();
+
+        let cred = state.get_credential("openai").unwrap().unwrap();
+        assert_eq!(cred.api_key.as_deref(), Some("sk-openai"));
+        assert_eq!(cred.provider, "openai");
+    }
+
+    #[test]
+    fn test_update_credential_model_oauth_provider() {
+        let (state, _dir) = temp_auth_state();
+        let now_plus_3600 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64 + 3600)
+            .unwrap_or(0);
+        state
+            .store_oauth_credential_with_refresh(
+                "openai-codex",
+                "at_xxx",
+                Some("rt_yyy"),
+                Some(now_plus_3600),
+                Some("ChatGPT (Codex)"),
+                Some("gpt-4o"),
+            )
+            .unwrap();
+
+        state.update_credential_model("openai-codex", "o1-mini").unwrap();
+
+        let cred = state.get_credential("openai-codex").unwrap().unwrap();
+        assert_eq!(cred.model.as_deref(), Some("o1-mini"));
+        // OAuth token must survive the model update untouched.
+        assert_eq!(cred.oauth_token.as_deref(), Some("at_xxx"));
+    }
+
+    #[test]
+    fn test_update_credential_model_unknown_provider_fails() {
+        let (state, _dir) = temp_auth_state();
+        let result = state.update_credential_model("nonexistent", "some-model");
         assert!(result.is_err());
     }
 

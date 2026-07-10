@@ -26,6 +26,7 @@ import {
   useDisconnectProvider,
   useSaveSetupToken,
   useStartOpenAiOAuth,
+  useSetProviderModel,
 } from "@/hooks/useTauri";
 
 // ---------------------------------------------------------------------------
@@ -53,6 +54,13 @@ const OPENAI_MODELS = [
   { label: "o1-mini (reasoning)", value: "o1-mini" },
   { label: "o1 (reasoning, powerful)", value: "o1" },
 ] as const;
+
+// ChatGPT/Codex OAuth subscriptions route through a restricted backend
+// (chatgpt.com/backend-api/codex, distinct from api.openai.com) — "o1"
+// (full) has not been confirmed available there, so it's excluded to avoid
+// another "model not supported" error. openai-codex users get everything
+// except the full "o1" tier.
+const OPENAI_CODEX_MODELS = OPENAI_MODELS.filter((m) => m.value !== "o1");
 
 const GEMINI_MODELS = [
   { label: "Gemini 2.5 Flash (fast)", value: "gemini-2.5-flash" },
@@ -498,6 +506,57 @@ function OllamaConnectForm({ onConnected }: { onConnected: () => void }) {
 // Management form (connected state, expanded)
 // ---------------------------------------------------------------------------
 
+/**
+ * Editable model dropdown for an already-connected provider. Calls
+ * set_provider_model immediately on change (no separate Save button —
+ * matches the rest of Settings' auto-save pattern). Uses status.provider
+ * (the BACKEND slug, e.g. "openai-codex") as the credential key so the
+ * update hits the correct stored credential, not just the UI slot.
+ */
+function ModelDropdown({
+  backendSlug,
+  models,
+  currentModel,
+  defaultModel,
+}: {
+  backendSlug: string;
+  models: readonly { label: string; value: string }[];
+  currentModel: string | null | undefined;
+  defaultModel: string;
+}) {
+  const setModel = useSetProviderModel();
+  const value = currentModel ?? defaultModel;
+
+  return (
+    <div className="space-y-2">
+      <p className="text-sm font-semibold text-text-primary">Model</p>
+      <Select
+        value={value}
+        onValueChange={async (next) => {
+          try {
+            await setModel.mutateAsync({ provider: backendSlug, model: next });
+            toast.success(`Model changed to ${models.find((m) => m.value === next)?.label ?? next}`);
+          } catch (err) {
+            toast.error((err as Error).message);
+          }
+        }}
+        disabled={setModel.isPending}
+      >
+        <SelectTrigger className="w-full">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {models.map((m) => (
+            <SelectItem key={m.value} value={m.value}>
+              {m.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
+  );
+}
+
 function ManagementForm({
   provider,
   status,
@@ -521,29 +580,39 @@ function ManagementForm({
     }
   };
 
+  // status.provider is the BACKEND slug ("openai" or "openai-codex" for the
+  // OpenAI card, matching provider for anthropic/gemini/ollama).
+  const backendSlug = status.provider ?? provider;
+  const isCodex = backendSlug === "openai-codex";
+
   return (
     <div className="px-4 pb-4 pt-3 space-y-4 border-t border-border-primary">
-      {/* Model info (for Anthropic, model change requires re-connecting — simplest v1.1 approach) */}
       {provider === "anthropic" ? (
-        <div className="space-y-1">
-          <p className="text-sm font-semibold text-text-primary">Model</p>
-          <p className="text-sm text-text-secondary font-mono">{status.model ?? ANTHROPIC_DEFAULT_MODEL}</p>
-          <p className="text-xs text-text-tertiary">Reconnect to change model</p>
-        </div>
+        <ModelDropdown
+          backendSlug={backendSlug}
+          models={ANTHROPIC_MODELS}
+          currentModel={status.model}
+          defaultModel={ANTHROPIC_DEFAULT_MODEL}
+        />
       ) : provider === "openai" ? (
-        <div className="space-y-1">
-          <p className="text-sm font-semibold text-text-primary">Model</p>
-          <p className="text-sm text-text-secondary font-mono">{status.model ?? OPENAI_DEFAULT_MODEL}</p>
-        </div>
+        <ModelDropdown
+          backendSlug={backendSlug}
+          models={isCodex ? OPENAI_CODEX_MODELS : OPENAI_MODELS}
+          currentModel={status.model}
+          defaultModel={OPENAI_DEFAULT_MODEL}
+        />
       ) : provider === "gemini" ? (
-        <div className="space-y-1">
-          <p className="text-sm font-semibold text-text-primary">Model</p>
-          <p className="text-sm text-text-secondary font-mono">{status.model ?? GEMINI_DEFAULT_MODEL}</p>
-        </div>
+        <ModelDropdown
+          backendSlug={backendSlug}
+          models={GEMINI_MODELS}
+          currentModel={status.model}
+          defaultModel={GEMINI_DEFAULT_MODEL}
+        />
       ) : (
         <div className="space-y-1">
           <p className="text-sm font-semibold text-text-primary">Model</p>
           <p className="text-sm text-text-secondary font-mono">{status.model ?? "(no model)"}</p>
+          <p className="text-xs text-text-tertiary">Ollama model is set via the connection URL above</p>
         </div>
       )}
 

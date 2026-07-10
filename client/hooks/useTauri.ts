@@ -772,6 +772,23 @@ export function useSetActiveProvider() {
 }
 
 /**
+ * Change the model on an already-connected provider without disconnecting.
+ * Works for OAuth providers (openai-codex) too, which previously had no way
+ * to change model except full disconnect+reconnect through a flow with no
+ * model picker at all.
+ */
+export function useSetProviderModel() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ provider, model }: { provider: string; model: string }) =>
+      tauriInvoke<void>("set_provider_model", { provider, model }, () => undefined as void),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.providers });
+    },
+  });
+}
+
+/**
  * Saves an Anthropic OAuth setup token (sk-ant-oat01-...) as the Anthropic credential.
  * Validates the token against the Anthropic API before storing.
  */

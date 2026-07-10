@@ -126,6 +126,23 @@ pub fn set_active_provider(
     crate::auth::commands::set_active_provider(auth, provider)
 }
 
+/// Change the model on an already-connected provider without disconnecting.
+///
+/// Fixes a real gap: previously the only way to change a provider's model
+/// was full disconnect+reconnect, and OAuth providers (openai-codex) have
+/// no model picker in their connect flow at all — the model was
+/// permanently stuck at whatever default was chosen on first connect.
+///
+/// Frontend invocation: `tauriInvoke("set_provider_model", { provider: "openai-codex", model: "gpt-4o" })`
+#[tauri::command]
+pub fn set_provider_model(
+    auth: State<'_, AuthState>,
+    provider: String,
+    model: String,
+) -> Result<(), String> {
+    auth.update_credential_model(&provider, &model)
+}
+
 /// Get the currently active AI provider key.
 ///
 /// Frontend invocation: `tauriInvoke("get_active_provider")` → `string | null`
