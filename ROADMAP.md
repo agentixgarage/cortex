@@ -29,7 +29,7 @@ Public roadmap for Cortex. Anyone can pick up an unclaimed item — open an issu
 
 | # | Feature | Description | Effort |
 |---|---|---|---|
-| 1 | 🚧 Chat suggestions | After each answer, show 3 clickable follow-up chips. Click → auto-send. LLM-generated from current turn context. | 4 h |
+| 1 | ✅ Chat suggestions | After each answer, show up to 3 clickable follow-up chips. Click → auto-send. Deterministic (template-based on year/doc-count patterns in the citations, no extra LLM call — zero added latency or rate-limit risk). | 4 h |
 | 2 | ⏳ Onboarding form | 10 opt-in questions (name aliases, family, countries, currencies, key assets) seed entity graph before first doc. Massive day-1 accuracy boost. | 1 d |
 | 3 | ⏳ Daily quiz card | One card/day in Dashboard: "Is Alex Doe the same as A Doe?" [Yes/No/Later]. Feeds alias merging + Pass 2 correction. Non-intrusive. **Plus** a "Take more quizzes" tab under Insights for users who want to actively train the model — batch of 10 at a time, alias merges + entity subclass confirmations + relation confirmations + doc-topic confirmations. All answers logged for feedback loop. | 1 d |
 | 4 | ⏳ Tesseract OCR pipeline | Rasterize image-PDFs → tesseract-rs → text → same embedding path. Unblocks passports, scanned receipts, ID cards. | 2 d |

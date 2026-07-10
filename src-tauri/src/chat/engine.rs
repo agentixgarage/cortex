@@ -31,7 +31,7 @@ use crate::graph::entity_store::EntityStore;
 use crate::pipeline::embedder::EmbeddingService;
 use crate::types::{
     ChatMessage, ChatRole, ChatStreamCompletePayload, ChatStreamErrorPayload,
-    ChatStreamTokenPayload, Citation, SearchFilters,
+    ChatStreamSuggestionsPayload, ChatStreamTokenPayload, Citation, SearchFilters,
 };
 
 /// Cosine-similarity floor below which the engine short-circuits to a canned
@@ -387,6 +387,17 @@ impl ChatEngine {
                         Some(citations.clone()),
                     )
                     .await;
+                    let suggestions = Self::generate_suggestions(&query, &citations);
+                    if !suggestions.is_empty() {
+                        let _ = app.emit(
+                            "chat-stream-suggestions",
+                            ChatStreamSuggestionsPayload {
+                                session_id: session_id.clone(),
+                                message_id: assistant_message_id.clone(),
+                                suggestions,
+                            },
+                        );
+                    }
                     return Ok(());
                 }
                 crate::ai::StreamChunk::Error { message } => {
@@ -432,9 +443,20 @@ impl ChatEngine {
             &session_id,
             &assistant_message_id,
             &content_buffer,
-            Some(citations),
+            Some(citations.clone()),
         )
         .await;
+        let suggestions = Self::generate_suggestions(&query, &citations);
+        if !suggestions.is_empty() {
+            let _ = app.emit(
+                "chat-stream-suggestions",
+                ChatStreamSuggestionsPayload {
+                    session_id: session_id.clone(),
+                    message_id: assistant_message_id.clone(),
+                    suggestions,
+                },
+            );
+        }
 
         Ok(())
     }
@@ -470,6 +492,62 @@ impl ChatEngine {
         parts.join(" ")
     }
 
+    /// Generate 0-3 follow-up question suggestions from the just-completed
+    /// turn. Deterministic (template-based, no LLM call) — keeps suggestions
+    /// free of extra latency/rate-limit risk. Generic across any domain:
+    /// looks at years present in citation titles, distinct cited docs, and
+    /// whether the query looked like an aggregate ("total", "how much",
+    /// "how many") to decide which templates apply.
+    ///
+    /// [v1.2 #1: Chat suggestions]
+    fn generate_suggestions(query: &str, citations: &[Citation]) -> Vec<String> {
+        let mut suggestions: Vec<String> = Vec::new();
+        let q_lower = query.to_lowercase();
+
+        let mut years: Vec<String> = Vec::new();
+        for c in citations {
+            for y in Self::find_years(&c.doc_title) {
+                if !years.contains(&y) {
+                    years.push(y);
+                }
+            }
+        }
+        years.sort();
+
+        let is_aggregate = q_lower.contains("total")
+            || q_lower.contains("how much")
+            || q_lower.contains("how many")
+            || q_lower.contains("sum");
+
+        // Template 1: multi-year citation set + aggregate query → offer breakdown.
+        if is_aggregate && years.len() > 1 {
+            suggestions.push("Can you break that down by year?".to_string());
+        }
+
+        // Template 2: multiple distinct docs cited → offer to see the list.
+        let distinct_docs: std::collections::HashSet<&str> =
+            citations.iter().map(|c| c.doc_title.as_str()).collect();
+        if distinct_docs.len() > 1 {
+            suggestions.push("Which documents did you use for this answer?".to_string());
+        }
+
+        // Template 3: aggregate query but query doesn't already scope a year → offer year filter.
+        if is_aggregate && Self::find_years(&q_lower).is_empty() && !years.is_empty() {
+            suggestions.push(format!(
+                "What about just {}?",
+                years.last().cloned().unwrap_or_default()
+            ));
+        }
+
+        // Fallback templates if nothing else triggered — keep it generically useful.
+        if suggestions.is_empty() && !citations.is_empty() {
+            suggestions.push("Can you show me more detail on this?".to_string());
+        }
+
+        suggestions.truncate(3);
+        suggestions
+    }
+
     /// Find known canonical entities whose name (or an alias) appears in the
     /// query. Case-insensitive substring match. Returns entity IDs. Used for
     /// pre-filtering docs to those mentioning the same entity — massively
@@ -498,19 +576,49 @@ impl ChatEngine {
         ids
     }
 
-    /// Extract 4-digit years (19xx / 20xx) from a query string. Used to
-    /// pre-filter documents by year when the user asks about a specific year.
-    fn extract_years(query: &str) -> Vec<String> {
+    /// Find 4-digit years (19xx / 20xx) anywhere in `s` by scanning maximal
+    /// runs of ASCII digits — NOT regex `\b`, which fails to match a year
+    /// preceded/followed by `_` (underscore is a word char, so "Receipt_2020"
+    /// has no `\b` before "2020"). Filenames like `Prop_Tax_FY2020-21.pdf`
+    /// are exactly the case this must handle correctly.
+    ///
+    /// A digit run longer than 4 (e.g. an 8-digit reference number) does NOT
+    /// yield a false year — only EXACT 4-digit runs starting with 19/20 count.
+    fn find_years(s: &str) -> Vec<String> {
         let mut years: Vec<String> = Vec::new();
-        let re = regex::Regex::new(r"\b(19|20)\d{2}\b").expect("year regex");
-        for m in re.find_iter(query) {
-            let y = m.as_str().to_string();
-            if !years.contains(&y) {
-                years.push(y);
+        let mut run_start: Option<usize> = None;
+        let bytes = s.as_bytes();
+
+        let mut flush = |start: Option<usize>, end: usize, years: &mut Vec<String>| {
+            if let Some(st) = start {
+                let run = &s[st..end];
+                if run.len() == 4 && (run.starts_with("19") || run.starts_with("20")) && !years.contains(&run.to_string()) {
+                    years.push(run.to_string());
+                }
+            }
+        };
+
+        for (i, b) in bytes.iter().enumerate() {
+            if b.is_ascii_digit() {
+                if run_start.is_none() {
+                    run_start = Some(i);
+                }
+            } else {
+                flush(run_start, i, &mut years);
+                run_start = None;
             }
         }
-        // FY 2024-25 style: capture the "-25" tail as a two-digit hint too
-        let fy = regex::Regex::new(r"\b(?:FY|fy)\s*(\d{4})[-–—](\d{2,4})\b").expect("fy regex");
+        flush(run_start, s.len(), &mut years);
+
+        years
+    }
+
+    /// Extract 4-digit years (19xx / 20xx) from a query string. Used to
+    /// pre-filter documents by year when the user asks about a specific year.
+    /// Also recognizes `FY 2024-25` style (captures the start year).
+    fn extract_years(query: &str) -> Vec<String> {
+        let mut years = Self::find_years(query);
+        let fy = regex::Regex::new(r"(?i)\bFY\s*(\d{4})[-\x{2013}\x{2014}](\d{2,4})\b").expect("fy regex");
         for cap in fy.captures_iter(query) {
             if let Some(start_year) = cap.get(1) {
                 let y = start_year.as_str().to_string();
@@ -613,9 +721,6 @@ impl ChatEngine {
             collection.db.search(search_query).map_err(|e| e.to_string())?
         };
 
-        // Regex used to detect a year token in each doc's path/excerpt.
-        let doc_year_re = regex::Regex::new(r"\b(19|20)\d{2}\b").expect("doc year re");
-
         let mut all_candidates: Vec<(String, String, Chunk, f32)> = Vec::new();
 
         for raw in raw_results {
@@ -650,10 +755,7 @@ impl ChatEngine {
             let mut year_boost: f32 = 0.0;
             if !query_years.is_empty() {
                 let hay = format!("{} {}", doc_title, doc_path);
-                let doc_years: Vec<String> = doc_year_re
-                    .find_iter(&hay)
-                    .map(|m| m.as_str().to_string())
-                    .collect();
+                let doc_years: Vec<String> = Self::find_years(&hay);
                 let matches_query_year = query_years.iter().any(|qy| doc_years.contains(qy));
                 if matches_query_year {
                     year_boost = 0.15;
@@ -831,5 +933,119 @@ mod tests {
         assert_eq!(answer_or_canned(0.19), Some(NO_MATCH_ANSWER));
         assert_eq!(answer_or_canned(0.20), None);
         assert_eq!(answer_or_canned(0.9), None);
+    }
+
+    // ── generate_suggestions (v1.2 #1: Chat suggestions) ──
+
+    fn make_citation(index: u32, doc_title: &str) -> Citation {
+        Citation {
+            index,
+            doc_id: format!("doc-{}", index),
+            doc_title: doc_title.to_string(),
+            chunk_start: 0,
+            chunk_end: 10,
+        }
+    }
+
+    #[test]
+    fn test_suggestions_empty_when_no_citations() {
+        let s = ChatEngine::generate_suggestions("how much total?", &[]);
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn test_suggestions_aggregate_multi_year_offers_breakdown() {
+        let citations = vec![
+            make_citation(1, "Receipt_2020.pdf"),
+            make_citation(2, "Receipt_2021.pdf"),
+        ];
+        let s = ChatEngine::generate_suggestions("how much total did I pay?", &citations);
+        assert!(s.iter().any(|x| x.contains("break") || x.contains("year")));
+    }
+
+    #[test]
+    fn test_suggestions_multi_doc_offers_source_list() {
+        let citations = vec![
+            make_citation(1, "Invoice A.pdf"),
+            make_citation(2, "Invoice B.pdf"),
+        ];
+        let s = ChatEngine::generate_suggestions("what did I spend?", &citations);
+        assert!(s.iter().any(|x| x.to_lowercase().contains("document")));
+    }
+
+    #[test]
+    fn test_suggestions_capped_at_three() {
+        let citations = vec![
+            make_citation(1, "Receipt_2019.pdf"),
+            make_citation(2, "Receipt_2020.pdf"),
+            make_citation(3, "Receipt_2021.pdf"),
+        ];
+        let s = ChatEngine::generate_suggestions("what is the total amount?", &citations);
+        assert!(s.len() <= 3);
+    }
+
+    #[test]
+    fn test_suggestions_single_doc_non_aggregate_falls_back() {
+        let citations = vec![make_citation(1, "Passport.pdf")];
+        let s = ChatEngine::generate_suggestions("what is my passport number?", &citations);
+        // No multi-year, no multi-doc, no aggregate → fallback template applies.
+        assert_eq!(s, vec!["Can you show me more detail on this?".to_string()]);
+    }
+
+    // ── find_years: regression tests for the underscore-boundary bug ──
+    // Bug: `\b(19|20)\d{2}\b` never matches "2020" in "Receipt_2020.pdf"
+    // because `_` is a \w char, so there's no \b between "_" and "2".
+
+    #[test]
+    fn test_find_years_underscore_delimited_filename() {
+        assert_eq!(
+            ChatEngine::find_years("Prop_Sarovar_P705_FY2016-17.pdf"),
+            vec!["2016".to_string()]
+        );
+        assert_eq!(
+            ChatEngine::find_years("Receipt_2020.pdf"),
+            vec!["2020".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_find_years_hyphen_delimited() {
+        assert_eq!(
+            ChatEngine::find_years("Invoice-2021-final.pdf"),
+            vec!["2021".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_find_years_plain_text() {
+        assert_eq!(
+            ChatEngine::find_years("how much property tax did I pay in 2025?"),
+            vec!["2025".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_find_years_ignores_non_year_digit_runs() {
+        // 8-digit reference number must NOT be misread as two years or one year.
+        assert!(ChatEngine::find_years("Ref 12345678 amount due").is_empty());
+        // 5-digit run starting with 20 must NOT match (exact 4-digit only).
+        assert!(ChatEngine::find_years("Order 20255 confirmed").is_empty());
+    }
+
+    #[test]
+    fn test_find_years_multiple_distinct_years() {
+        let years = ChatEngine::find_years("Compare_2019_vs_2022_report.pdf");
+        assert_eq!(years, vec!["2019".to_string(), "2022".to_string()]);
+    }
+
+    #[test]
+    fn test_find_years_dedups() {
+        let years = ChatEngine::find_years("2020 tax year 2020 filing");
+        assert_eq!(years, vec!["2020".to_string()]);
+    }
+
+    #[test]
+    fn test_find_years_no_years_present() {
+        assert!(ChatEngine::find_years("no dates here at all").is_empty());
     }
 }

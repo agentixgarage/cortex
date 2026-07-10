@@ -59,6 +59,12 @@ interface ErrorPayload {
   error: string;
 }
 
+interface SuggestionsPayload {
+  sessionId: string;
+  messageId: string;
+  suggestions: string[];
+}
+
 export default function ChatPage() {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -66,6 +72,7 @@ export default function ChatPage() {
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [suggestions, setSuggestions] = useState<string[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const unlistenersRef = useRef<Array<() => void>>([]);
 
@@ -100,12 +107,14 @@ export default function ChatPage() {
     setActiveSessionId(session.id);
     setMessages(session.messages);
     setError(null);
+    setSuggestions([]);
   }
 
   function newChat() {
     setActiveSessionId(null);
     setMessages([]);
     setError(null);
+    setSuggestions([]);
   }
 
   async function deleteSession(id: string, e: React.MouseEvent) {
@@ -120,11 +129,12 @@ export default function ChatPage() {
     }
   }
 
-  async function send() {
-    const query = input.trim();
+  async function send(overrideQuery?: string) {
+    const query = (overrideQuery ?? input).trim();
     if (!query || streaming) return;
     setInput("");
     setError(null);
+    setSuggestions([]);
 
     const userTemp: ChatMessage = {
       id: `tmp-user-${Date.now()}`,
@@ -227,10 +237,26 @@ export default function ChatPage() {
         },
       );
 
+      // Suggestions arrive AFTER chat-stream-complete (backend emits them
+      // once persist finishes) — kept out of cleanupListeners() so it isn't
+      // torn down by the completion handler before it fires.
+      const unlistenSuggestions = await listen<SuggestionsPayload>(
+        "chat-stream-suggestions",
+        (evt) => {
+          if (evt.payload.messageId !== assistantId) return;
+          setSuggestions(evt.payload.suggestions);
+          unlistenSuggestions();
+          unlistenersRef.current = unlistenersRef.current.filter(
+            (u) => u !== unlistenSuggestions,
+          );
+        },
+      );
+
       unlistenersRef.current.push(
         unlistenToken,
         unlistenComplete,
         unlistenError,
+        unlistenSuggestions,
       );
 
       function cleanupListeners() {
@@ -325,6 +351,22 @@ export default function ChatPage() {
           </div>
         </ScrollArea>
 
+        {!streaming && suggestions.length > 0 && (
+          <div className="border-t border-border/50 px-6 py-3">
+            <div className="mx-auto flex max-w-3xl flex-wrap gap-2">
+              {suggestions.map((s, i) => (
+                <button
+                  key={i}
+                  onClick={() => void send(s)}
+                  className="rounded-full border border-border bg-background px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:border-primary hover:text-foreground"
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         <div className="border-t border-border p-4">
           <div className="mx-auto flex max-w-3xl items-end gap-2">
             <textarea
@@ -336,7 +378,7 @@ export default function ChatPage() {
               disabled={streaming}
               className="flex-1 resize-none rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50"
             />
-            <Button onClick={send} disabled={streaming || !input.trim()}>
+            <Button onClick={() => void send()} disabled={streaming || !input.trim()}>
               {streaming ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
               ) : (

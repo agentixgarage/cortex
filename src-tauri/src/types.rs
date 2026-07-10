@@ -1061,6 +1061,20 @@ pub struct ChatStreamErrorPayload {
     pub error: String,
 }
 
+/// Event payload for the `chat-stream-suggestions` Tauri event (v1.2 #1:
+/// chat follow-up suggestions). Emitted after `chat-stream-complete`, as a
+/// separate lightweight follow-up so the main answer is never blocked on
+/// suggestion generation. `suggestions` is 0-3 short follow-up questions
+/// derived deterministically from the just-completed turn (no extra LLM
+/// call — see `ChatEngine::generate_suggestions`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatStreamSuggestionsPayload {
+    pub session_id: String,
+    pub message_id: String,
+    pub suggestions: Vec<String>,
+}
+
 /// IPC request shape for the `start_chat` command (Plan 05).
 /// `session_id: None` starts a new session (D-15); `filters` carries D-04
 /// filter passthrough from the current search view, reusing `SearchFilters`.
